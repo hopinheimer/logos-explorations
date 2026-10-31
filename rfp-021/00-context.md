@@ -103,7 +103,7 @@ Where we can win (differentiators):
 
 ## 5. Novel ideas (validation status in brackets)
 
-### A. Prove-don't-execute: run the update in LEZ's own proven mode [validated by code reading; needs experiment E1]
+### A. Prove-don't-execute: run the update in LEZ's own proven mode [validated by E1, see `e1/README.md`; node-level run pending]
 Bisociation: LEZ's privacy machinery is also a compute-offload channel. The sequencer pays a flat fee to verify a private part, whatever it computed.
 
 Mechanism:

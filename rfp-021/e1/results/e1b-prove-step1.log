@@ -1,0 +1,6 @@
+test state::tests::lc_spike::e1b_real_update_in_proven_mode has been running for over 60 seconds
+E1B private_update_cycles=12903333 public_part_cycles=14768 prove_s=995.2 tx_bytes=227451 input_bytes=52079
+test state::tests::lc_spike::e1b_real_update_in_proven_mode ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 303 filtered out; finished in 995.57s
+     1001.04 real     14840.42 user        37.47 sys
+         14089551872  maximum resident set size

@@ -1,0 +1,102 @@
+# E1: does a light-client update run in LEZ's proven (private) mode?
+# `just` lists the recipes. Everything builds under .work/ (git-ignored).
+
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+here := justfile_directory()
+work := here / ".work"
+lez := work / "lez"
+lez_repo := "https://github.com/logos-blockchain/logos-execution-zone.git"
+lez_tag := "v0.4.0-rc1"
+results := here / "results"
+e1b := work / "e1b"
+lee_test := "cargo test -p lee --release --lib"
+# chain_state's tests need `test-utils`, which LEZ refuses without debug assertions.
+chain_test := "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo test -p chain_state --release --lib"
+
+default:
+    @just --list --unsorted
+
+# Clone LEZ at the pinned tag and apply the E1 patch (re-applies when the patch changes)
+lez:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -d "{{lez}}" ] || git clone --depth 1 --branch {{lez_tag}} {{lez_repo}} "{{lez}}"
+    marker="{{lez}}/.e1-patched"
+    if [ ! -f "$marker" ] || [ "{{here}}/lez-patch/e1.patch" -nt "$marker" ]; then
+        cd "{{lez}}"
+        git checkout -q -- . && git clean -qfd -- lee lez
+        git apply "{{here}}/lez-patch/e1.patch"
+        touch "$marker"
+    fi
+
+# E1a, dev mode: mechanism, refusals, metered public cycles
+e1a: lez
+    mkdir -p {{results}}
+    cd {{lez}} && RISC0_DEV_MODE=1 {{lee_test}} lc_spike -- --nocapture --test-threads 1 2>&1 \
+      | grep -E '^E1A|^test |test result' | tee {{results}}/e1a-dev.log
+
+# E1a, real proof of a 12.6M-cycle private update (CPU, via r0vm)
+e1a-prove: lez
+    mkdir -p {{results}}
+    cd {{lez}} && /usr/bin/time -l env RISC0_DEV_MODE=0 {{lee_test}} e1a_proven_update_advances -- --nocapture 2>&1 \
+      | grep -E '^E1A|^test |test result|maximum resident|real' | tee {{results}}/e1a-prove.log
+
+# E1b: dump the real mainnet update steps (Sextant's vectors) as guest inputs
+e1b-inputs:
+    cargo run --release --manifest-path vendor/sextant/host/Cargo.toml --bin e1b_input -- {{e1b}}
+
+# RISC Zero toolchains installed by rzup (`rzup install rust`, `rzup install cpp`); blst is C.
+risc0_rust := env("RISC0_RUST", `ls -d "$HOME"/.risc0/toolchains/v1.*-rust-* | sort -V | tail -1` / "bin")
+risc0_cc := env("RISC0_CC", home_directory() / ".risc0/cpp/bin/riscv32-unknown-elf-gcc")
+# macOS `ar` silently drops RISC-V ELF objects (empty libblst.a): use the toolchain's own.
+risc0_ar := parent_directory(risc0_cc) / "riscv32-unknown-elf-ar"
+
+# E1b: build the guest (Sextant core + accelerated blst, as a LEZ actor) and pack it with the kernel
+e1b-elf:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{e1b}}"
+    flags=$(printf '%s\x1f' -C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C link-arg=--fatal-warnings \
+      -C panic=abort --cfg 'getrandom_backend="custom"')
+    cd e1b-guest
+    RUSTC="{{risc0_rust}}/rustc" CARGO_ENCODED_RUSTFLAGS="${flags%$'\x1f'}" CC=/no_cc RISC0_FEATURE_bigint2= \
+      CC_riscv32im_risc0_zkvm_elf="{{risc0_cc}}" AR_riscv32im_risc0_zkvm_elf="{{risc0_ar}}" CFLAGS_riscv32im_risc0_zkvm_elf="-march=rv32im -nostdlib" \
+      cargo build --release --target riscv32im-risc0-zkvm-elf --bin e1b_lc
+    cd ..
+    cargo run --release --manifest-path e1b-pack/Cargo.toml -- \
+      e1b-guest/target/riscv32im-risc0-zkvm-elf/release/e1b_lc "{{e1b}}/e1b_lc.bin"
+
+# E1b, dev mode: real mainnet update `step` settles; private and public cycles
+e1b step="1": lez e1b-inputs e1b-elf
+    mkdir -p {{results}}
+    cd {{lez}} && E1B_ELF={{e1b}}/e1b_lc.bin E1B_INPUT={{e1b}}/step-{{step}}.bin E1B_STORE={{e1b}}/store-{{step}}.bin \
+      RISC0_DEV_MODE=1 {{lee_test}} e1b_real_update -- --ignored --nocapture 2>&1 \
+      | grep -E '^E1B|^test |test result|panicked' | tee {{results}}/e1b-dev-step{{step}}.log
+
+# E1b, real proof of real mainnet update `step` (CPU, via r0vm)
+e1b-prove step="1": lez e1b-inputs e1b-elf
+    mkdir -p {{results}}
+    cd {{lez}} && /usr/bin/time -l env E1B_ELF={{e1b}}/e1b_lc.bin E1B_INPUT={{e1b}}/step-{{step}}.bin \
+      E1B_STORE={{e1b}}/store-{{step}}.bin RISC0_DEV_MODE=0 {{lee_test}} e1b_real_update -- --ignored --nocapture 2>&1 \
+      | grep -E '^E1B|^test |test result|panicked|maximum resident|real' | tee {{results}}/e1b-prove-step{{step}}.log
+
+# E1c, dev mode: block fee path (gas actually charged) and a racing copy
+e1c: lez
+    mkdir -p {{results}}
+    cd {{lez}} && RISC0_DEV_MODE=1 {{chain_test}} e1c_ -- --nocapture --test-threads 1 2>&1 \
+      | grep -E '^E1C|^test |test result|panicked' | tee {{results}}/e1c-dev.log
+
+# E1c with real proofs, so settlement verifies real receipts. The fee is flat in the private
+# work, so a small `burn` keeps proving short; pass burn=572700 for the 12.6M-cycle case.
+e1c-prove burn="1000": lez
+    mkdir -p {{results}}
+    cd {{lez}} && E1_BURN={{burn}} RISC0_DEV_MODE=0 {{chain_test}} e1c_ -- --nocapture --test-threads 1 2>&1 \
+      | grep -E '^E1C|^test |test result|panicked' | tee {{results}}/e1c-prove.log
+
+# All dev-mode runs (minutes)
+all: e1a e1b e1c
+
+# Remove .work/
+clean:
+    rm -rf {{work}}

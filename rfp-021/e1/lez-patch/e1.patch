@@ -1,0 +1,646 @@
+diff --git a/lee/state_machine/src/lib.rs b/lee/state_machine/src/lib.rs
+index 7207ea0..3c7f751 100644
+--- a/lee/state_machine/src/lib.rs
++++ b/lee/state_machine/src/lib.rs
+@@ -106,6 +106,14 @@ mod test_methods {
+         )
+     }
+ 
++    #[must_use]
++    pub const fn lc_spike() -> Program {
++        Program::new_unchecked(
++            test_methods::LC_SPIKE_ID,
++            Cow::Borrowed(test_methods::LC_SPIKE_ELF),
++        )
++    }
++
+     #[must_use]
+     pub const fn scripted() -> Program {
+         Program::new_unchecked(
+diff --git a/lee/state_machine/src/state/tests/lc_spike.rs b/lee/state_machine/src/state/tests/lc_spike.rs
+new file mode 100644
+index 0000000..dfbccf4
+--- /dev/null
++++ b/lee/state_machine/src/state/tests/lc_spike.rs
+@@ -0,0 +1,339 @@
++//! E1a: can a light-client update run in LEZ's proven (private) mode and
++//! advance a public instance, and what does the sequencer meter for it?
++
++use borsh::BorshDeserialize;
++use lee_core::{
++    execution_state::PublicExecutionContext as Ctx,
++    program::ReceiveInput,
++};
++
++use super::*;
++use crate::{
++    test_utils::{TestPrivateKeys, update_witness},
++    validated_state_diff::ValidatedStateDiff,
++};
++
++#[derive(BorshSerialize, BorshDeserialize)]
++enum LcMsg {
++    Update {
++        instance: Actor,
++        burn: u64,
++        prev: Vec<u8>,
++        next: Vec<u8>,
++    },
++    Advance {
++        prev: Vec<u8>,
++        next: Vec<u8>,
++    },
++}
++
++const GENESIS: &[u8] = b"store-0";
++const NEXT: &[u8] = b"store-1";
++const INSTANCE: AccountId = AccountId::new([42; 32]);
++
++fn lc_id() -> AccountId {
++    AccountId::from_builtin_program(crate::test_methods::lc_spike().id())
++}
++
++fn instance() -> Actor {
++    Actor::new(INSTANCE, lc_id())
++}
++
++fn burn() -> u64 {
++    std::env::var("E1_BURN").ok().and_then(|v| v.parse().ok()).unwrap_or(572_700)
++}
++
++struct Fixture {
++    state: V03State,
++    keys: TestPrivateKeys,
++    account_id: AccountId,
++    pre_account: Account,
++}
++
++impl Fixture {
++    fn new() -> Self {
++        let keys = test_private_account_keys_1();
++        let account_id = AccountId::for_regular_private_account(&keys.npk(), &keys.vpk());
++        let pre_account = Account::funded(100);
++        let mut state = V03State::new()
++            .with_programs([
++                crate::test_methods::lc_spike(),
++                crate::test_methods::scripted(),
++            ])
++            .with_private_account(&keys, &pre_account);
++        state.force_insert_account(
++            INSTANCE,
++            Account::default().with_actor_state(lc_id(), GENESIS.to_vec().into()),
++        );
++        Self {
++            state,
++            keys,
++            account_id,
++            pre_account,
++        }
++    }
++
++    fn prove_from(
++        &self,
++        program: AccountId,
++        catalog: ProgramCatalog,
++        message: &impl BorshSerialize,
++        present: SenderPresentation,
++    ) -> PrivacyPreservingTransaction {
++        let membership_proof = self
++            .state
++            .get_proof_for_commitment(&Commitment::new(&self.account_id, &self.pre_account))
++            .expect("the account's commitment must be in state");
++        let input = ProvingInput {
++            public_context: Ctx::new(vec![instance()], []),
++            private_witnesses: vec![update_witness(
++                &self.keys,
++                self.pre_account.clone(),
++                membership_proof,
++            )],
++            ..proving_input(root(Actor::new(self.account_id, program), message))
++        };
++        let proven = execute_and_prove_with_cross_messages(
++            input,
++            // `Advance` sends nothing back across the boundary.
++            vec![Vec::new()],
++            &catalog,
++            |_| present,
++            |_, _| false,
++            no_seal,
++        )
++        .unwrap();
++        private_tx(proven, vec![], &[])
++    }
++
++    fn prove_update(&self, prev: &[u8], present: SenderPresentation) -> PrivacyPreservingTransaction {
++        self.prove_from(
++            lc_id(),
++            synthetic_program(crate::test_methods::lc_spike()),
++            &LcMsg::Update {
++                instance: instance(),
++                burn: burn(),
++                prev: prev.to_vec(),
++                next: NEXT.to_vec(),
++            },
++            present,
++        )
++    }
++
++    fn instance_store(&self) -> Vec<u8> {
++        self.state
++            .get_account_by_id(INSTANCE)
++            .data
++            .actor_state(lc_id())
++            .as_ref()
++            .to_vec()
++    }
++
++    fn metered(&self, tx: &PrivacyPreservingTransaction) -> Result<ExecutionCharge, LeeError> {
++        ValidatedStateDiff::from_privacy_preserving_transaction_metered(tx, &self.state, 1, 0, 10_000_000)
++            .map(|(_, charge)| charge)
++    }
++}
++
++use crate::validated_state_diff::ExecutionCharge;
++
++/// Cycles the private `Update` handler takes when executed directly, i.e. what
++/// a public execution of the same check would be metered.
++fn private_cycles() -> u64 {
++    let input = ReceiveInput {
++        receiver: Actor::new(AccountId::new([7; 32]), lc_id()),
++        from: None,
++        is_authorized: true,
++        pre_state: ActorState::empty(),
++        message: borsh::to_vec(&LcMsg::Update {
++            instance: instance(),
++            burn: burn(),
++            prev: GENESIS.to_vec(),
++            next: NEXT.to_vec(),
++        })
++        .unwrap(),
++    };
++    let (_, cycles) = crate::test_methods::lc_spike()
++        .handle_message(&input, u64::MAX)
++        .unwrap();
++    cycles
++}
++
++#[test]
++fn e1a_proven_update_advances_the_public_instance() {
++    let mut f = Fixture::new();
++    let t = std::time::Instant::now();
++    let tx = f.prove_update(GENESIS, SenderPresentation::Canonical);
++    let prove_s = t.elapsed().as_secs_f64();
++    let charge = f.metered(&tx).expect("the transaction is well formed");
++    assert!(charge.revert.is_none(), "{:?}", charge.revert);
++    let proof_bytes = borsh::to_vec(&tx.witness_set).unwrap().len();
++    println!(
++        "E1A private_update_cycles={} public_part_cycles={} prove_s={prove_s:.1} witness_set_bytes={proof_bytes} boundary={:?}",
++        private_cycles(),
++        charge.cycles,
++        tx.message.execution.boundary,
++    );
++    f.state
++        .transition_from_privacy_preserving_transaction(&tx, 1, 0)
++        .expect("the proven update settles");
++    assert_eq!(f.instance_store(), NEXT);
++}
++
++#[test]
++fn e1a_blinded_sender_still_authenticates_its_program() {
++    let mut f = Fixture::new();
++    let tx = f.prove_update(GENESIS, SenderPresentation::Blinded([9; 32]));
++    f.state
++        .transition_from_privacy_preserving_transaction(&tx, 1, 0)
++        .expect("a blinded sender of the same program advances the instance");
++    assert_eq!(f.instance_store(), NEXT);
++}
++
++#[test]
++fn e1a_stale_store_is_refused_and_nothing_moves() {
++    let mut f = Fixture::new();
++    let tx = f.prove_update(b"some-other-store", SenderPresentation::Canonical);
++    let err = f.metered(&tx).unwrap_err().to_string();
++    println!("E1A stale refused: {err}");
++    assert!(err.contains("stale store"));
++    assert!(
++        f.state
++            .transition_from_privacy_preserving_transaction(&tx, 1, 0)
++            .is_err()
++    );
++    assert_eq!(f.instance_store(), GENESIS);
++}
++
++#[test]
++fn e1a_advance_from_another_program_is_refused() {
++    let mut f = Fixture::new();
++    // A private actor of `scripted` sends a well-formed `Advance` straight to the instance.
++    let forged = Script::default().send_sync(
++        instance(),
++        &LcMsg::Advance {
++            prev: GENESIS.to_vec(),
++            next: b"forged".to_vec(),
++        },
++    );
++    let tx = f.prove_from(
++        scripted_id(),
++        synthetic_program(crate::test_methods::scripted()),
++        &forged,
++        SenderPresentation::Canonical,
++    );
++    let err = f.metered(&tx).unwrap_err().to_string();
++    println!("E1A forged refused: {err}");
++    assert!(err.contains("advance must come from this program"));
++    assert!(
++        f.state
++            .transition_from_privacy_preserving_transaction(&tx, 1, 0)
++            .is_err()
++    );
++    assert_eq!(f.instance_store(), GENESIS);
++}
++
++#[test]
++fn e1a_replayed_update_is_refused() {
++    let mut f = Fixture::new();
++    let tx = f.prove_update(GENESIS, SenderPresentation::Canonical);
++    f.state
++        .transition_from_privacy_preserving_transaction(&tx, 1, 0)
++        .unwrap();
++    // Same update again (a racing operator's copy): the store has moved.
++    let err = f
++        .state
++        .transition_from_privacy_preserving_transaction(&tx, 2, 0)
++        .unwrap_err();
++    println!("E1A replay err={err}");
++    assert_eq!(f.instance_store(), NEXT);
++}
++
++// ---------------------------------------------------------------------------
++// E1b: a real mainnet sync-committee update (Sextant's core, accelerated blst)
++// run as a private actor. Needs E1B_ELF (guest ELF) and E1B_INPUT (borsh input).
++
++#[derive(BorshSerialize, BorshDeserialize)]
++enum RealMsg {
++    Update { instance: Actor, input: Vec<u8> },
++    Advance { prev: Vec<u8>, next: Vec<u8> },
++}
++
++#[test]
++#[ignore = "needs E1B_ELF, E1B_INPUT and E1B_STORE"]
++fn e1b_real_update_in_proven_mode() {
++    let elf = std::fs::read(std::env::var("E1B_ELF").unwrap()).unwrap();
++    let input = std::fs::read(std::env::var("E1B_INPUT").unwrap()).unwrap();
++    let image_id: ProgramId = risc0_zkvm::compute_image_id(&elf).unwrap().into();
++    let program = Program::new_unchecked(image_id, std::borrow::Cow::Owned(elf));
++    let program_id = AccountId::from_builtin_program(program.id());
++    let instance = Actor::new(INSTANCE, program_id);
++
++    // The instance starts at the store the update builds on (written by the dumper).
++    let store_bytes = std::fs::read(std::env::var("E1B_STORE").unwrap()).unwrap();
++
++    let keys = test_private_account_keys_1();
++    let account_id = AccountId::for_regular_private_account(&keys.npk(), &keys.vpk());
++    let pre_account = Account::funded(100);
++    let mut state = V03State::new()
++        .with_programs([program.clone()])
++        .with_private_account(&keys, &pre_account);
++    state.force_insert_account(
++        INSTANCE,
++        Account::default().with_actor_state(program_id, store_bytes.clone().into()),
++    );
++
++    let message = RealMsg::Update {
++        instance,
++        input: input.clone(),
++    };
++    let private_cycles = {
++        let probe = ReceiveInput {
++            receiver: Actor::new(AccountId::new([7; 32]), program_id),
++            from: None,
++            is_authorized: true,
++            pre_state: ActorState::empty(),
++            message: borsh::to_vec(&message).unwrap(),
++        };
++        program.handle_message(&probe, u64::MAX).unwrap().1
++    };
++
++    let membership_proof = state
++        .get_proof_for_commitment(&Commitment::new(&account_id, &pre_account))
++        .unwrap();
++    let proving = ProvingInput {
++        public_context: Ctx::new(vec![instance], []),
++        private_witnesses: vec![update_witness(&keys, pre_account.clone(), membership_proof)],
++        ..proving_input(root(Actor::new(account_id, program_id), &message))
++    };
++    let t = std::time::Instant::now();
++    let proven = execute_and_prove_with_cross_messages(
++        proving,
++        vec![Vec::new()],
++        &ProgramCatalog::from([(program_id, program.clone())]),
++        |_| SenderPresentation::Blinded([9; 32]),
++        |_, _| false,
++        no_seal,
++    )
++    .unwrap();
++    let prove_s = t.elapsed().as_secs_f64();
++    let tx = private_tx(proven, vec![], &[]);
++    let (_, charge) = ValidatedStateDiff::from_privacy_preserving_transaction_metered(
++        &tx, &state, 1, 0, 10_000_000,
++    )
++    .unwrap();
++    assert!(charge.revert.is_none(), "{:?}", charge.revert);
++    let tx_bytes = borsh::to_vec(&tx).unwrap().len();
++    println!(
++        "E1B private_update_cycles={private_cycles} public_part_cycles={} prove_s={prove_s:.1} tx_bytes={tx_bytes} input_bytes={}",
++        charge.cycles,
++        input.len()
++    );
++    state
++        .transition_from_privacy_preserving_transaction(&tx, 1, 0)
++        .expect("the proven real update settles");
++    assert_ne!(
++        state.get_account_by_id(INSTANCE).data.actor_state(program_id).as_ref(),
++        store_bytes.as_slice()
++    );
++}
+diff --git a/lee/state_machine/src/state/tests/mod.rs b/lee/state_machine/src/state/tests/mod.rs
+index 4e97ef2..fc5ec52 100644
+--- a/lee/state_machine/src/state/tests/mod.rs
++++ b/lee/state_machine/src/state/tests/mod.rs
+@@ -47,6 +47,7 @@ mod deploy;
+ mod events;
+ mod flash_swap;
+ mod genesis;
++mod lc_spike;
+ mod native_transfer;
+ mod pending_messages;
+ mod privacy_preserving;
+diff --git a/lee/state_machine/test_methods/guest/src/bin/lc_spike.rs b/lee/state_machine/test_methods/guest/src/bin/lc_spike.rs
+new file mode 100644
+index 0000000..4157249
+--- /dev/null
++++ b/lee/state_machine/test_methods/guest/src/bin/lc_spike.rs
+@@ -0,0 +1,50 @@
++//! E1 spike: a light-client-shaped program. A private actor runs the heavy
++//! check (`Update`), then advances the program's public instance actor
++//! (`Advance`), which trusts only messages from its own program and only on
++//! top of the store it currently holds.
++
++use borsh::{BorshDeserialize, BorshSerialize};
++use lee_core::{
++    account::Actor,
++    program::{ReceiveInput, Response},
++};
++
++#[derive(BorshSerialize, BorshDeserialize)]
++pub enum LcMsg {
++    Update {
++        instance: Actor,
++        burn: u64,
++        prev: Vec<u8>,
++        next: Vec<u8>,
++    },
++    Advance {
++        prev: Vec<u8>,
++        next: Vec<u8>,
++    },
++}
++
++fn handle(input: &ReceiveInput) -> Response {
++    match borsh::from_slice::<LcMsg>(&input.message).expect("lc message") {
++        LcMsg::Update {
++            instance,
++            burn,
++            prev,
++            next,
++        } => {
++            // Stand-in for the sync-committee verification.
++            let mut x = 0x9e37_79b9_7f4a_7c15_u64;
++            for i in 0..burn {
++                x = core::hint::black_box(x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(i));
++            }
++            assert_ne!(x, 1);
++            Response::keep_state().send_sync(instance, &LcMsg::Advance { prev, next })
++        }
++        LcMsg::Advance { prev, next } => {
++            assert!(input.from_own_program(), "advance must come from this program");
++            assert_eq!(input.pre_state.as_ref(), prev.as_slice(), "stale store");
++            Response::set_state(next)
++        }
++    }
++}
++
++lee_core::actor_entrypoint!(raw handle);
+diff --git a/lez/chain_state/src/apply.rs b/lez/chain_state/src/apply.rs
+index 7a088aa..45f92c3 100644
+--- a/lez/chain_state/src/apply.rs
++++ b/lez/chain_state/src/apply.rs
+@@ -1986,4 +1986,209 @@ mod tests {
+         }
+         .into_pending_block()
+     }
++
++    // -----------------------------------------------------------------------
++    // E1c: a light-client update proven as a private actor, settled through the
++    // block fee path: what the block is charged, and what a racing copy costs.
++
++    #[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
++    enum LcMsg {
++        Update {
++            instance: Actor,
++            burn: u64,
++            prev: Vec<u8>,
++            next: Vec<u8>,
++        },
++        Advance {
++            prev: Vec<u8>,
++            next: Vec<u8>,
++        },
++    }
++
++    const fn lc_spike() -> Program {
++        Program::new_unchecked(
++            test_methods::LC_SPIKE_ID,
++            Cow::Borrowed(test_methods::LC_SPIKE_ELF),
++        )
++    }
++
++    const E1C_GENESIS: &[u8] = b"store-0";
++    const E1C_NEXT: &[u8] = b"store-1";
++
++    fn e1c_instance() -> Actor {
++        Actor::new(
++            AccountId::new([42; 32]),
++            AccountId::from_builtin_program(lc_spike().id()),
++        )
++    }
++
++    fn e1c_state(seeds: &[u8]) -> (V03State, Vec<(TestPrivateKeys, lee::Account)>) {
++        let (state, senders) = private_sender_state(seeds);
++        let mut state = state.with_programs(vec![lc_spike()]);
++        let instance = e1c_instance();
++        state.force_insert_account(
++            instance.account_id,
++            lee::Account::default()
++                .with_actor_state(instance.program_account_id, E1C_GENESIS.to_vec().into()),
++        );
++        (state, senders)
++    }
++
++    fn e1c_update_tx(
++        state: &V03State,
++        (keys, funded): &(TestPrivateKeys, lee::Account),
++        fee: lee_core::FeeTransfer,
++    ) -> LeeTransaction {
++        let instance = e1c_instance();
++        let public_actors = vec![
++            instance,
++            Actor::native_balance(system_accounts::fee_inbox_account_id()),
++        ];
++        let public_actor_states = public_actors
++            .iter()
++            .map(|actor| {
++                (
++                    *actor,
++                    state
++                        .get_account_by_id(actor.account_id)
++                        .data
++                        .actor_state(actor.program_account_id)
++                        .clone(),
++                )
++            })
++            .collect();
++        let membership_proof = state
++            .get_proof_for_commitment(&lee_core::Commitment::new(&keys.account_id(), funded))
++            .expect("the sender's commitment is in state");
++        let burn = std::env::var("E1_BURN")
++            .ok()
++            .and_then(|v| v.parse().ok())
++            .unwrap_or(572_700);
++        let (output, proof) = lee::execute_and_prove(
++            lee::ProvingInput {
++                root: TransactionEntry::Sync(RootCall {
++                    to: Actor::new(keys.account_id(), instance.program_account_id),
++                    message: borsh::to_vec(&LcMsg::Update {
++                        instance,
++                        burn,
++                        prev: E1C_GENESIS.to_vec(),
++                        next: E1C_NEXT.to_vec(),
++                    })
++                    .unwrap(),
++                }),
++                claims: Vec::new(),
++                fee: Some(fee),
++                public_context: lee::PublicExecutionContext::new(public_actors, []),
++                private_witnesses: vec![update_witness(keys, funded.clone(), membership_proof)],
++                dummy_inputs: Vec::new(),
++                ciphertext_padding: None,
++                recoveries: vec![RecipientEncryption {
++                    recipient: Recipient {
++                        npk: keys.npk(),
++                        vpk: keys.vpk(),
++                        kind: PrivateAccountKind::Regular,
++                        opening: Some(ALIAS_OPENING),
++                    },
++                    esk: EphemeralSecretKey([1; 32]),
++                }],
++                private_promotions: BTreeSet::new(),
++            },
++            &lee::Simulation {
++                public_actor_states,
++                admitted_accounts: None,
++            },
++            &ProgramCatalog {
++                programs: HashMap::from([(
++                    instance.program_account_id,
++                    Dependency {
++                        program: lc_spike(),
++                        kind: ProgramKind::Disclosed,
++                    },
++                )]),
++            },
++            |_| SenderPresentation::Blinded(ALIAS_OPENING),
++            |_, _| false,
++            no_seal,
++        )
++        .expect("the update proves");
++        let message = lee::privacy_preserving_transaction::Message::from_circuit_output(
++            BTreeMap::new(),
++            output,
++        );
++        LeeTransaction::PrivacyPreserving(lee::PrivacyPreservingTransaction::new(
++            message,
++            lee::privacy_preserving_transaction::WitnessSet::from_raw_parts(vec![], proof),
++        ))
++    }
++
++    fn e1c_instance_store(state: &V03State) -> Vec<u8> {
++        let instance = e1c_instance();
++        state
++            .get_account_by_id(instance.account_id)
++            .data
++            .actor_state(instance.program_account_id)
++            .as_ref()
++            .to_vec()
++    }
++
++    #[test]
++    fn e1c_proven_update_settles_through_the_block_fee_path() {
++        let (state, senders) = e1c_state(&[0x61]);
++        let sender = &senders[0];
++        // Reserve for up to 50k public cycles; the surplus is refunded.
++        let reserve = fee_core::assess::private_fee_required(50_000, 8, 8);
++        let tx = e1c_update_tx(&state, sender, inbox_fee(reserve, sender.0.account_id()));
++        let tx_bytes = borsh::to_vec(&tx).unwrap().len();
++        let mut settled = state;
++        let mut summary = BlockFeeSummary::default();
++        let (_, reverted) = settle_transaction(
++            &tx,
++            &mut settled,
++            &FeeState::genesis(),
++            1,
++            100,
++            0,
++            &mut summary,
++        )
++        .expect("the proven update settles");
++        assert!(!reverted);
++        assert_eq!(e1c_instance_store(&settled), E1C_NEXT);
++        let public_cycles = summary.gas_used_exec - fee_core::market::PRIVATE_VERIFY_GAS;
++        println!(
++            "E1C settled gas_used_exec={} (verify {} + public {public_cycles}) gas_used_stor={} \
++             base_fee_paid={} tx_bytes={tx_bytes} block_exec_share={:.2}% block_stor_share={:.2}%",
++            summary.gas_used_exec,
++            fee_core::market::PRIVATE_VERIFY_GAS,
++            summary.gas_used_stor,
++            summary.revenue_base,
++            100.0 * summary.gas_used_exec as f64 / fee_core::market::MAX_GAS_EXEC as f64,
++            100.0 * summary.gas_used_stor as f64 / fee_core::market::MAX_GAS_STOR as f64,
++        );
++        assert_eq!(summary.gas_used_stor, fee_core::market::PRIVATE_GAS_STOR);
++    }
++
++    #[test]
++    fn e1c_a_racing_copy_reverts_and_is_charged() {
++        let (state, senders) = e1c_state(&[0x62, 0x63]);
++        let reserve = fee_core::assess::private_fee_required(50_000, 8, 8);
++        // Two operators prove the same update against the same store.
++        let first = e1c_update_tx(&state, &senders[0], inbox_fee(reserve, senders[0].0.account_id()));
++        let second = e1c_update_tx(&state, &senders[1], inbox_fee(reserve, senders[1].0.account_id()));
++        let mut settled = state;
++        let mut summary = BlockFeeSummary::default();
++        let (_, reverted) =
++            settle_transaction(&first, &mut settled, &FeeState::genesis(), 1, 100, 0, &mut summary)
++                .expect("the first update settles");
++        assert!(!reverted);
++        let before = summary.revenue_base;
++        let (_, reverted) =
++            settle_transaction(&second, &mut settled, &FeeState::genesis(), 1, 100, 1, &mut summary)
++                .expect("the racing copy is included, as a revert");
++        assert!(reverted, "the store moved, so the copy's public part fails");
++        assert_eq!(e1c_instance_store(&settled), E1C_NEXT);
++        println!(
++            "E1C racing copy reverted, charged base_fee={} (the winner paid {before})",
++            summary.revenue_base - before
++        );
++    }
+ }
