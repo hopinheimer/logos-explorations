@@ -38,6 +38,7 @@ LEZ `v0.4.0-rc1` (`1806e873`). RISC Zero 3.0.5 guests, `r0vm` 3.0.6. Apple M3 Ma
 | E1a, **real proof** | toy update, 12.6M cycles | settles with a verified receipt; **895 s** CPU, **13.0 GB** peak, proof **224,813 B** |
 | E1b, dev | **real mainnet update** with committee handoff (Sextant vectors, step 1) | settles; private **12,903,333** cycles, public part **14,768** cycles; input 52,079 B stays off chain |
 | E1b, **real proof** | the same real update | settles with a verified receipt; **995 s** CPU, **14.1 GB** peak, transaction **227,451 B** |
+| E1b, dev | the same real update **executed directly** (what a sequencer would run on the public path) | **230 ms** mean of 5. For scale: LEZ's fee model prices verifying a private-transaction receipt at about 12 ms (`PRIVATE_VERIFY_GAS`, M2 Pro calibration) |
 | E1c, dev | toy update through the block fee path (`settle_transaction`) | exec gas **419,311** = 409,764 flat + 9,547; storage gas **224,063**; **4.19%** of a block's exec, **22.4%** of its storage; base fee 5,146,992 at the floor price |
 | E1c, dev | two operators race the same update | loser lands as a **charged revert**: 5,470,616 (its full reserve), store unchanged |
 | E1c, **real proofs** | both E1c cases, tiny private burn | identical gas and fees with real receipts; 3 proofs in 699 s (**about 233 s per private transaction** of fixed circuit overhead) |
@@ -67,6 +68,7 @@ Public-path figures come from Sextant's published measurements, not from this ex
 |---|---|---|
 | **Run on a standalone sequencer node** | Settlement code is covered (`settle_transaction`, the code the sequencer runs). Untested: RPC submission, mempool admission, deployment through the program loader, the node's rules on which public accounts a private transaction may touch. | Needs a Bedrock node. LEZ's resolver found **no prebuilt binary** for the pinned revision and the source build **failed to link** here (Rust 1.99, `rust-lld`). Next try: `bedrock/tools/resolve_bedrock_node_in_docker.sh`, then an integration test modelled on `integration_tests/tests/async_payouts.rs`. |
 | GPU proving time | Sets realistic operator cost and update latency. | Metal needs Xcode + Metal toolchain (only Command Line Tools here). Or run on a CUDA box. |
+| Remote proving (Bonsai, Boundless) | Lets operators without proving hardware submit. A prover is liveness-only: it cannot forge an update. | Split the proof. The heavy program proof (about 760 s, public inputs only) goes remote. The privacy-circuit proof (about 233 s, needs the submitter's private keys) stays local. LEZ proves both through one `default_prover()`, so the split needs a small LEZ change or a daemon-side path. Open checks: Bonsai availability, and whether Boundless receipts work as circuit assumptions. Fallback: a throwaway fee-only private account. Planned as E1d (needs an API key). |
 | Lowest-spec machine | P.4 asks for the declared minimum. | Repeat `e1b-prove` on a 16 GB machine. |
 | Testnet 0.4 | Delivery target; not released (end of November per roadmap). | Re-run on release. |
 

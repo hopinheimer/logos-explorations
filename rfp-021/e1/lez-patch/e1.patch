@@ -19,10 +19,10 @@ index 7207ea0..3c7f751 100644
          Program::new_unchecked(
 diff --git a/lee/state_machine/src/state/tests/lc_spike.rs b/lee/state_machine/src/state/tests/lc_spike.rs
 new file mode 100644
-index 0000000..dfbccf4
+index 0000000..d2f8e0d
 --- /dev/null
 +++ b/lee/state_machine/src/state/tests/lc_spike.rs
-@@ -0,0 +1,339 @@
+@@ -0,0 +1,351 @@
 +//! E1a: can a light-client update run in LEZ's proven (private) mode and
 +//! advance a public instance, and what does the sequencer meter for it?
 +
@@ -320,7 +320,19 @@ index 0000000..dfbccf4
 +            pre_state: ActorState::empty(),
 +            message: borsh::to_vec(&message).unwrap(),
 +        };
-+        program.handle_message(&probe, u64::MAX).unwrap().1
++        // Warm-up, then time a public-style execution (what a sequencer would run).
++        let _ = program.handle_message(&probe, u64::MAX).unwrap();
++        let runs = 5;
++        let t = std::time::Instant::now();
++        let mut cycles = 0;
++        for _ in 0..runs {
++            cycles = program.handle_message(&probe, u64::MAX).unwrap().1;
++        }
++        println!(
++            "E1B public_execution_ms={:.0} (mean of {runs}, same update executed directly)",
++            t.elapsed().as_secs_f64() * 1000.0 / f64::from(runs)
++        );
++        cycles
 +    };
 +
 +    let membership_proof = state
