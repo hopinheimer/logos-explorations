@@ -21,6 +21,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "alloy-rlp"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6aafa19ee4ccc64dad34105c83a62c004c893ee0dd6763931b37430bdae197f4"
+dependencies = [
+ "bytes",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -749,9 +758,9 @@ name = "e1b-guest"
 version = "0.1.0"
 dependencies = [
  "borsh",
+ "eth-lc-core",
  "lee_core",
  "risc0-zkvm",
- "sextant-core",
 ]
 
 [[package]]
@@ -815,6 +824,17 @@ name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
+
+[[package]]
+name = "eth-lc-core"
+version = "0.1.0"
+dependencies = [
+ "alloy-rlp",
+ "blst",
+ "borsh",
+ "sha2",
+ "tiny-keccak",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -1887,16 +1907,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "sextant-core"
-version = "0.1.0"
-dependencies = [
- "blst",
- "borsh",
- "sha2",
- "tiny-keccak",
 ]
 
 [[package]]

@@ -1,0 +1,23 @@
+[package]
+name = "eth-lc-core"
+description = "Ethereum light-client core (consensus-specs sync protocol, execution anchor, MPT claims) for RISC Zero guests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["std"]
+std = ["borsh/std", "alloy-rlp/std", "sha2/std"]
+# Minimal-preset chain profile, used by the consensus-specs conformance tests.
+minimal-profile = []
+# Exposes the spec store transition for host conformance tests.
+spec-oracle = []
+
+[dependencies]
+# RISC Zero forks: accelerated paths on `target_os = "zkvm"`, plain code elsewhere.
+blst = { git = "https://github.com/risc0/blst", tag = "v0.3.16-risczero.0", default-features = false }
+sha2 = { git = "https://github.com/risc0/RustCrypto-hashes", tag = "sha2-v0.10.8-risczero.0", default-features = false }
+tiny-keccak = { git = "https://github.com/risc0/tiny-keccak", tag = "tiny-keccak/v2.0.2-risczero.0", default-features = false, features = ["keccak"] }
+borsh = { version = "1.5", default-features = false, features = ["derive"] }
+alloy-rlp = { version = "0.3", default-features = false }

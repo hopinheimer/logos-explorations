@@ -1,0 +1,32 @@
+[package]
+name = "eth-lc-host"
+description = "Host-side support for eth-lc-core: Beacon API and SSZ decoding, key hints, checkpoint checks, evidence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+eth-lc-core = { path = "../eth-lc-core" }
+ethereum_ssz = "0.10"
+ethereum_ssz_derive = "0.10"
+ssz_types = "0.14"
+tree_hash = "0.12"
+tree_hash_derive = "0.12"
+ethereum_serde_utils = "0.8"
+alloy-primitives = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+snap = "1"
+ureq = { version = "3", features = ["json"] }
+hex = "0.4"
+anyhow = "1"
+borsh = "1.5"
+alloy-consensus = { version = "2", default-features = false }
+alloy-rlp = "0.3"
+alloy-trie = "0.9"
+blst = { git = "https://github.com/risc0/blst", tag = "v0.3.16-risczero.0" }
+
+[dev-dependencies]
+eth-lc-core = { path = "../eth-lc-core", features = ["minimal-profile", "spec-oracle"] }

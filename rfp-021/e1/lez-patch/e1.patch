@@ -275,7 +275,7 @@ index 0000000..d2f8e0d
 +}
 +
 +// ---------------------------------------------------------------------------
-+// E1b: a real mainnet sync-committee update (Sextant's core, accelerated blst)
++// E1b: a real mainnet sync-committee update (eth-lc-core, accelerated blst)
 +// run as a private actor. Needs E1B_ELF (guest ELF) and E1B_INPUT (borsh input).
 +
 +#[derive(BorshSerialize, BorshDeserialize)]

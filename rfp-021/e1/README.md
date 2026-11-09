@@ -27,6 +27,7 @@ sequenceDiagram
 ## Results
 
 LEZ `v0.4.0-rc1` (`1806e873`). RISC Zero 3.0.5 guests, `r0vm` 3.0.6. Apple M3 Max, 16 cores, 64 GB.
+E1b runs `eth-lc-core` (`../../eth-lc`), written from consensus-specs `v1.7.0-beta.4`, on recorded mainnet periods 1902 to 1905.
 
 | Run | What | Result |
 |---|---|---|
@@ -36,28 +37,28 @@ LEZ `v0.4.0-rc1` (`1806e873`). RISC Zero 3.0.5 guests, `r0vm` 3.0.6. Apple M3 Ma
 | E1a, dev | blinded sender | still recognised as its program; settles |
 | E1a, dev | same transaction replayed | refused by LEZ (commitment already seen) |
 | E1a, **real proof** | toy update, 12.6M cycles | settles with a verified receipt; **895 s** CPU, **13.0 GB** peak, proof **224,813 B** |
-| E1b, dev | **real mainnet update** with committee handoff (Sextant vectors, step 1) | settles; private **12,903,333** cycles, public part **14,768** cycles; input 52,079 B stays off chain |
-| E1b, **real proof** | the same real update | settles with a verified receipt; **995 s** CPU, **14.1 GB** peak, transaction **227,451 B** |
-| E1b, dev | the same real update **executed directly** (what a sequencer would run on the public path) | **230 ms** mean of 5. For scale: LEZ's fee model prices verifying a private-transaction receipt at about 12 ms (`PRIVATE_VERIFY_GAS`, M2 Pro calibration) |
+| E1b, dev | **real mainnet update** with committee handoff (period 1902 to 1903, step 1) | settles; private **14,039,076** cycles, public part **20,032** cycles; input 52,204 B stays off chain |
+| E1b, **real proof** | the same real update | settles with a verified receipt; **1,079 s** CPU, **12.2 GB** peak, transaction **228,299 B** |
+| E1b, dev | the same real update **executed directly** (what a sequencer would run on the public path) | **260 ms** mean of 5. For scale: LEZ's fee model prices verifying a private-transaction receipt at about 12 ms (`PRIVATE_VERIFY_GAS`, M2 Pro calibration) |
 | E1c, dev | toy update through the block fee path (`settle_transaction`) | exec gas **419,311** = 409,764 flat + 9,547; storage gas **224,063**; **4.19%** of a block's exec, **22.4%** of its storage; base fee 5,146,992 at the floor price |
 | E1c, dev | two operators race the same update | loser lands as a **charged revert**: 5,470,616 (its full reserve), store unchanged |
 | E1c, **real proofs** | both E1c cases, tiny private burn | identical gas and fees with real receipts; 3 proofs in 699 s (**about 233 s per private transaction** of fixed circuit overhead) |
 
 ### Against the public multi-step path
 
-| | Public, 3 transactions (Sextant on v0.3) | Proven, 1 transaction (E1) |
+| | Public, 3 transactions (Proposal #224 on v0.3) | Proven, 1 transaction (E1) |
 |---|---|---|
-| Exec gas per update | about 12.6M (126% of one block, over 3 blocks) | 419,311 to 424,532 (4.2% of one block) |
+| Exec gas per update | about 12.6M (126% of one block, over 3 blocks) | 419,311 to 429,796 (4.2% to 4.3% of one block) |
 | Storage gas per update | update material, about 52 KB | 224,063 (the receipt) |
 | Base fee at floor prices | about 101M | about 5.1M (**about 20x less**) |
 | Job state across transactions | yes | none |
-| Submitter hardware | LEZ gas only | a prover: **995 s, 14.1 GB** on a 16-core laptop CPU for a real update (E1b) |
+| Submitter hardware | LEZ gas only | a prover: **1,079 s, 12.2 GB** on a 16-core laptop CPU for a real update (E1b) |
 
-Public-path figures come from Sextant's published measurements, not from this experiment.
+Public-path figures come from Proposal #224's published measurements, not from this experiment.
 
 ### Findings worth keeping
 
-1. Proving cost splits into a fixed part (about 233 s for any private transaction on this CPU) and the update itself (about 760 s more for the BLS check). GPU proving should cut both by an order of magnitude (Tessera reports about 30x on an NVIDIA L4), which is not yet measured here.
+1. Proving cost splits into a fixed part (about 233 s for any private transaction on this CPU) and the update itself (about 845 s more for the E1b update, 14.0M cycles). GPU proving should cut both by an order of magnitude (Tessera reports about 30x on an NVIDIA L4), which is not yet measured here.
 2. A canonical sender publishes the submitter's private account ID in the boundary message. Blind it (the test does).
 3. A losing racer pays its whole reserve. The update daemon must re-check the instance immediately before submitting (R.9) and keep its reserve tight.
 4. LEZ refuses `test-utils` in release builds without debug assertions. `chain_state` tests run with `CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true`.
@@ -68,7 +69,7 @@ Public-path figures come from Sextant's published measurements, not from this ex
 |---|---|---|
 | **Run on a standalone sequencer node** | Settlement code is covered (`settle_transaction`, the code the sequencer runs). Untested: RPC submission, mempool admission, deployment through the program loader, the node's rules on which public accounts a private transaction may touch. | Needs a Bedrock node. LEZ's resolver found **no prebuilt binary** for the pinned revision and the source build **failed to link** here (Rust 1.99, `rust-lld`). Next try: `bedrock/tools/resolve_bedrock_node_in_docker.sh`, then an integration test modelled on `integration_tests/tests/async_payouts.rs`. |
 | GPU proving time | Sets realistic operator cost and update latency. | Metal needs Xcode + Metal toolchain (only Command Line Tools here). Or run on a CUDA box. |
-| Remote proving (Bonsai, Boundless) | Lets operators without proving hardware submit. A prover is liveness-only: it cannot forge an update. | Split the proof. The heavy program proof (about 760 s, public inputs only) goes remote. The privacy-circuit proof (about 233 s, needs the submitter's private keys) stays local. LEZ proves both through one `default_prover()`, so the split needs a small LEZ change or a daemon-side path. Open checks: Bonsai availability, and whether Boundless receipts work as circuit assumptions. Fallback: a throwaway fee-only private account. Planned as E1d (needs an API key). |
+| Remote proving (Bonsai, Boundless) | Lets operators without proving hardware submit. A prover is liveness-only: it cannot forge an update. | Split the proof. The heavy program proof (about 845 s, public inputs only) goes remote. The privacy-circuit proof (about 233 s, needs the submitter's private keys) stays local. LEZ proves both through one `default_prover()`, so the split needs a small LEZ change or a daemon-side path. Open checks: Bonsai availability, and whether Boundless receipts work as circuit assumptions. Fallback: a throwaway fee-only private account. Planned as E1d (needs an API key). |
 | Lowest-spec machine | P.4 asks for the declared minimum. | Repeat `e1b-prove` on a 16 GB machine. |
 | Testnet 0.4 | Delivery target; not released (end of November per roadmap). | Re-run on release. |
 
@@ -95,13 +96,13 @@ Logs land in `results/`. Everything else builds under `.work/` (ignored).
 |---|---|
 | `justfile` | all recipes |
 | `lez-patch/e1.patch` | the LEZ changes: `lc_spike` guest, `lee` tests (E1a, E1b), `chain_state` tests (E1c) |
-| `e1b-guest/` | E1b guest: Sextant's core as a LEZ actor, accelerated `blst` |
+| `e1b-guest/` | E1b guest: `eth-lc-core` as a LEZ actor, accelerated `blst` |
+| `e1b-input/` | E1b inputs from the recorded mainnet chain-dir (`../../eth-lc/vectors/mainnet`) |
 | `e1b-pack/` | packs the guest ELF with RISC Zero's v1compat kernel (the form LEZ loads) |
-| `vendor/sextant/` | vendored from `edenbd1/lez-sextant` (MIT OR Apache-2.0), see `VENDORED.md` |
 | `results/` | logs of the runs above |
 
 ## Build notes
 
-- The E1b guest builds with a plain `cargo build` and the rzup toolchains, as Sextant's `build-guests.sh` does. risc0-build drops its `bigint2` signal once `CC_*` is overridden.
+- The E1b guest builds with a plain `cargo build` and the rzup toolchains. risc0-build drops its `bigint2` signal once `CC_*` is overridden.
 - macOS `ar` silently drops RISC-V objects (an empty `libblst.a`). The recipe sets `AR_riscv32im_risc0_zkvm_elf` to the RISC Zero toolchain's `ar`.
 - Real proving goes through the prebuilt `r0vm` (no `prove` feature), because building RISC Zero's Metal kernels needs Xcode.

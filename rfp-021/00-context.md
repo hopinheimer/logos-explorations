@@ -1,7 +1,7 @@
 # RFP-021 context load (2026-11-01)
 
 Status: context only. Discussion, plan and experiments come next.
-Sources are cloned in the session scratchpad (`src/rfp`, `src/lez`, `src/sextant`, `src/cs`).
+Sources are cloned in the session scratchpad (`src/rfp`, `src/lez`, `src/cs`).
 
 ## 1. Hard facts
 
@@ -36,7 +36,7 @@ Sources are cloned in the session scratchpad (`src/rfp`, `src/lez`, `src/sextant
 - Gloas (ePBS, EIP-7732) is live on Sepolia (2026-10-06) and Hoodi (2026-10-26). Mainnet has no date.
 - Gloas `LightClientHeader` drops `execution` and carries `execution_block_hash`, proven at gindex 2856 = `signed_execution_payload_bid.message.parent_block_hash`. State gindices move (EIP-7688): finalized root 735, current committee 2945, next committee 2946.
 - A light-client store needs at least one update per sync-committee period (27.3 h) to follow handoffs.
-- The "Logos Ethereum core module" is `logos-co/logos-verified-proxy-module` (Nimbus `libverifproxy`). It does not expose light-client objects or raw `eth_getProof` nodes. Its C ABI accepts host-supplied beacon and execution transports, which is the upstream extension point (Sextant's analysis, `docs/ETH-CORE-MODULE.md`).
+- The "Logos Ethereum core module" is `logos-co/logos-verified-proxy-module` (Nimbus `libverifproxy`). It does not expose light-client objects or raw `eth_getProof` nodes. Its C ABI accepts host-supplied beacon and execution transports, which is the upstream extension point (Proposal #224's analysis).
 
 ## 2. What reviewers reward (evidence from RFP-020 and RFP-003)
 
@@ -54,8 +54,8 @@ Sources are cloned in the session scratchpad (`src/rfp`, `src/lez`, `src/sextant
 
 ## 3. The three open proposals
 
-### #224 Sextant (Antumbra, 2 people) - the one to beat
-- Prototype `edenbd1/lez-sextant` (Rust, about 6.5k lines). v0.3 plan/apply program, deployed on the public v0.3 testnet, real mainnet, Sepolia and Hoodi vectors, Gloas handled, CI-reproducible builds, an on-chain verifier script, demo video, frequent updates.
+### Proposal #224 (Antumbra, 2 people) - the one to beat
+- Prototype in Rust, about 6.5k lines. v0.3 plan/apply program, deployed on the public v0.3 testnet, real mainnet, Sepolia and Hoodi vectors, Gloas handled, CI-reproducible builds, an on-chain verifier script, demo video, frequent updates.
 - Measurements (RISC0 cycles, mainnet period 1882):
   - pairing check: blst accelerated 7.85M; zkcrypto accelerated 19.7M.
   - signing key: aggregate minus non-signers 0.45M; full decompression 234M.
@@ -79,11 +79,11 @@ Do not publish anything from this list that reads as a vulnerability in their co
 - No prototype, no numbers, no Gloas, no LEZ code. Generic requirement restatement. Founder background is commodity quant work. $48k. Did not consent to public use. Weak.
 
 ### #239 le-sync (Nani Plus, 1.25 FTE)
-- Pipeline names copy Sextant (`begin_update`, `miller_update`, `finish_update`). Repo `cenwadike/LE-sync` was created recently (pushed 2026-10-30). No measurements. Electra and Fulu only (testnets run Gloas). Plans to store whole 512-key committees on chain. Replaces the audit with a $10k bug bounty. Says ownership passes to the Logos core team (the T&C say Logos maintains nothing). $60k. Weak.
+- Pipeline names copy Proposal #224 (`begin_update`, `miller_update`, `finish_update`). Repo `cenwadike/LE-sync` was created recently (pushed 2026-10-30). No measurements. Electra and Fulu only (testnets run Gloas). Plans to store whole 512-key committees on chain. Replaces the audit with a $10k bug bounty. Says ownership passes to the Logos core team (the T&C say Logos maintains nothing). $60k. Weak.
 
 ## 4. What a winning proposal needs
 
-Must-haves (table stakes, Sextant already has most):
+Must-haves (table stakes, Proposal #224 already has most):
 - Prototype evidence with reproducible numbers, on real chain data.
 - Full FURPS and VS traceability, every item mapped to a test or artifact.
 - An honest answer to the central feasibility question (BLS in-program).
@@ -118,7 +118,7 @@ Why it holds:
 - The update material stays off chain. Only the proof (224 KB) and a small boundary message are posted.
 
 Expected numbers (to measure):
-| | Public 3-step (Sextant) | Proven, 1 transaction |
+| | Public 3-step (Proposal #224) | Proven, 1 transaction |
 |---|---|---|
 | Exec gas | about 12.6M + fee overhead | 409,764 + a few thousand for the public apply |
 | Storage gas | update material (tens of KB) | 224,063 |
@@ -164,11 +164,11 @@ Open risks:
 
 - **E1** (decisive): on `v0.4.0-rc1`, a minimal LC program whose private actor runs a heavy check and sends `Advance` to its public instance actor. Measure exec gas and storage gas charged, then real proving time (CPU, GPU) for a real 12.6M-cycle update.
 - **E2**: private consumer attest with the query on a private LC actor. Enumerate every boundary crossing and what it reveals (F.8 evidence).
-- **E3**: port Sextant-equivalent BLS numbers to v0.4 (cycles for the public path, P.8 delta).
+- **E3**: port Proposal #224-equivalent BLS numbers to v0.4 (cycles for the public path, P.8 delta).
 - **E4**: EIP-2935 historical proof on Sepolia post-Gloas.
 
 ## 7. Questions to settle with you
 1. Team, capacity and track record we can claim.
 2. Compete head-on on a build (we need a prototype on 0.4 in about 9 days), or position differently.
 3. Primary update path: proven only, or proven plus a public fallback.
-4. Budget posture against Sextant's $40k + $40k.
+4. Budget posture against Proposal #224's $40k + $40k.

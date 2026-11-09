@@ -42,9 +42,9 @@ e1a-prove: lez
     cd {{lez}} && /usr/bin/time -l env RISC0_DEV_MODE=0 {{lee_test}} e1a_proven_update_advances -- --nocapture 2>&1 \
       | grep -E '^E1A|^test |test result|maximum resident|real' | tee {{results}}/e1a-prove.log
 
-# E1b: dump the real mainnet update steps (Sextant's vectors) as guest inputs
+# E1b: build guest inputs from the recorded mainnet chain-dir (eth-lc/vectors/mainnet)
 e1b-inputs:
-    cargo run --release --manifest-path vendor/sextant/host/Cargo.toml --bin e1b_input -- {{e1b}}
+    cargo run --release --manifest-path e1b-input/Cargo.toml -- {{e1b}}
 
 # RISC Zero toolchains installed by rzup (`rzup install rust`, `rzup install cpp`); blst is C.
 risc0_rust := env("RISC0_RUST", `ls -d "$HOME"/.risc0/toolchains/v1.*-rust-* | sort -V | tail -1` / "bin")
@@ -52,7 +52,7 @@ risc0_cc := env("RISC0_CC", home_directory() / ".risc0/cpp/bin/riscv32-unknown-e
 # macOS `ar` silently drops RISC-V ELF objects (empty libblst.a): use the toolchain's own.
 risc0_ar := parent_directory(risc0_cc) / "riscv32-unknown-elf-ar"
 
-# E1b: build the guest (Sextant core + accelerated blst, as a LEZ actor) and pack it with the kernel
+# E1b: build the guest (eth-lc-core + accelerated blst, as a LEZ actor) and pack it with the kernel
 e1b-elf:
     #!/usr/bin/env bash
     set -euo pipefail

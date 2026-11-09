@@ -1,0 +1,103 @@
+# eth-lc: Ethereum light-client crates for RISC Zero guests.
+# `just` lists the recipes. Downloaded conformance data lands in spec-data/ (ignored).
+
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+here := justfile_directory()
+data := here / "spec-data"
+spec_tag := "v1.7.0-beta.4"
+eth_tests_commit := "c67e485ff8b5be9abc8ad15345ec21aa22e290d9"
+
+default:
+    @just --list --unsorted
+
+# Unit tests, cross-checks, recorded mainnet chain, synthetic cases (the downloaded suites run in spec-tests and eth-tests)
+test:
+    cargo test --workspace -- --skip sync_vectors --skip leaf_indices_match_core_gindices --skip trie_tests
+    cargo check --manifest-path eth-lc-core/Cargo.toml --no-default-features
+
+# Everything: test, spec-tests, eth-tests
+all: test spec-tests eth-tests
+
+# consensus-specs light-client vectors at the pinned tag: sync (spec and strict store), single_merkle_proof
+spec-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for p in minimal mainnet; do
+        if [ ! -d "{{data}}/tests/$p" ]; then
+            mkdir -p "{{data}}"
+            curl -fsSL "https://github.com/ethereum/consensus-specs/releases/download/{{spec_tag}}/$p.tar.gz" \
+              | tar -xzf - -C "{{data}}" "tests/$p/*/light_client/*"
+        fi
+    done
+    SPEC_DATA="{{data}}" cargo test -p eth-lc-host --test spec_sync --test spec_gindex -- --nocapture
+
+# ethereum/tests TrieTests at the pinned commit, proofs via alloy-trie
+eth-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{data}}/TrieTests"
+    for f in trietest trieanyorder trietest_secureTrie trieanyorder_secureTrie hex_encoded_securetrie_test; do
+        [ -f "{{data}}/TrieTests/$f.json" ] || curl -fsSL -o "{{data}}/TrieTests/$f.json" \
+          "https://raw.githubusercontent.com/ethereum/tests/{{eth_tests_commit}}/TrieTests/$f.json"
+    done
+    SPEC_DATA="{{data}}" cargo test -p eth-lc-host --test trie_tests -- --nocapture
+
+# Light-client integration: recorded mainnet chain and claims, synthetic forks, real anchors, cross-checks
+lc-test:
+    cargo test -p eth-lc-host --test mainnet --test synthetic --test anchor_real --test merkle_xcheck --test mpt_xcheck --test checkpoint -- --nocapture
+
+# Re-record the mainnet chain-dir (periods 1902 to 1905) and the claim evidence
+vectors:
+    cargo run -p eth-lc-host --bin fetch_chain -- mainnet vectors/mainnet --period 1902 --count 4
+    cargo run -p eth-lc-host --bin fetch_evidence -- vectors/mainnet/evidence
+
+# Check a new-instance checkpoint against the default endpoints
+verify-checkpoint *args:
+    cargo run -p eth-lc-host --bin fetch_chain -- verify-checkpoint {{args}}
+
+# RISC Zero toolchains installed by rzup (`rzup install rust`, `rzup install cpp`); blst is C.
+risc0_rust := env("RISC0_RUST", `ls -d "$HOME"/.risc0/toolchains/v1.*-rust-* 2>/dev/null | sort -V | tail -1` / "bin")
+risc0_cc := env("RISC0_CC", home_directory() / ".risc0/cpp/bin/riscv32-unknown-elf-gcc")
+risc0_ar := parent_directory(risc0_cc) / "riscv32-unknown-elf-ar"
+
+# Consumer check: a git dependency on a bare clone of this working tree (committed in a
+# temporary clone only), the README guest example built with the rzup toolchain, patch-free manifest
+consumer-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp=$(mktemp -d)
+    repo=$(git -C "{{here}}" rev-parse --show-toplevel)
+    git clone -q "$repo" "$tmp/clone"
+    git -C "$tmp/clone" checkout -q -b eth-lc-consumer-check
+    rsync -a --exclude target --exclude spec-data "{{here}}/" "$tmp/clone/eth-lc/"
+    git -C "$tmp/clone" add eth-lc
+    git -C "$tmp/clone" -c user.name=check -c user.email=check@example.invalid commit -q -m "consumer check"
+    git clone -q --bare "$tmp/clone" "$tmp/eth-lc.git"
+    mkdir -p "$tmp/guest/src"
+    sed -n '/^```rust$/,/^```$/p' "{{here}}/eth-lc-core/README.md" | sed '1d;$d' > "$tmp/guest/src/main.rs"
+    cat > "$tmp/guest/Cargo.toml" <<TOML
+    [workspace]
+    [package]
+    name = "consumer-guest"
+    version = "0.1.0"
+    edition = "2021"
+    publish = false
+    [dependencies]
+    eth-lc-core = { git = "file://$tmp/eth-lc.git", branch = "eth-lc-consumer-check", default-features = false }
+    lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.4.0-rc1" }
+    borsh = { version = "1.5", features = ["derive"] }
+    risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["std", "unstable"] }
+    [profile.release]
+    lto = "thin"
+    codegen-units = 1
+    panic = "abort"
+    TOML
+    cd "$tmp/guest"
+    flags=$(printf '%s\x1f' -C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C link-arg=--fatal-warnings \
+      -C panic=abort --cfg 'getrandom_backend="custom"')
+    RUSTC="{{risc0_rust}}/rustc" CARGO_ENCODED_RUSTFLAGS="${flags%$'\x1f'}" CC=/no_cc RISC0_FEATURE_bigint2= \
+      CC_riscv32im_risc0_zkvm_elf="{{risc0_cc}}" AR_riscv32im_risc0_zkvm_elf="{{risc0_ar}}" CFLAGS_riscv32im_risc0_zkvm_elf="-march=rv32im -nostdlib" \
+      cargo build --release --target riscv32im-risc0-zkvm-elf
+    ls -la target/riscv32im-risc0-zkvm-elf/release/consumer-guest
+    rm -rf "$tmp"

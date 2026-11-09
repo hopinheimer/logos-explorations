@@ -1,0 +1,30 @@
+{
+  "network": "mainnet",
+  "trusted_block_root": "0xe7c0ae95dd6a82d9eca7d9dc4e1b42a4c8197fbb0e4cd880bc5f9631de2b992b",
+  "bootstrap": {
+    "fork": "fulu",
+    "file": "bootstrap.ssz"
+  },
+  "updates": [
+    {
+      "fork": "fulu",
+      "file": "update-1902.ssz"
+    },
+    {
+      "fork": "fulu",
+      "file": "update-1903.ssz"
+    },
+    {
+      "fork": "fulu",
+      "file": "update-1904.ssz"
+    },
+    {
+      "fork": "fulu",
+      "file": "update-1905.ssz"
+    }
+  ],
+  "finality_update": {
+    "fork": "fulu",
+    "file": "finality-update.ssz"
+  }
+}

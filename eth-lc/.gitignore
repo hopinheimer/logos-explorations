@@ -1,0 +1,3 @@
+target/
+# Downloaded conformance data (`just spec-tests`, `just eth-tests`).
+spec-data/

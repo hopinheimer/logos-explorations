@@ -1,0 +1,15 @@
+# E1b input builder: guest inputs from the recorded mainnet chain-dir.
+[workspace]
+
+[package]
+name = "e1b-input"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+eth-lc-core = { path = "../../../eth-lc/eth-lc-core" }
+eth-lc-host = { path = "../../../eth-lc/eth-lc-host" }
+borsh = "1.5"
+anyhow = "1"
