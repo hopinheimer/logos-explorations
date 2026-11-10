@@ -93,6 +93,13 @@ window-test elf update_tag="0" attest_tag="": lez e1b-inputs
       RISC0_DEV_MODE=1 {{lee_test}} e1b_wire_and_window -- --ignored --nocapture 2>&1 \
       | grep -E '^E1B|^test |test result|panicked'
 
+# E1b, dev mode: two instances under one program; each update advances only its own instance
+e1b-instances: lez e1b-inputs e1b-elf
+    mkdir -p {{results}}
+    cd {{lez}} && E1B_ELF={{e1b}}/e1b_lc.bin E1B_DIR={{e1b}} RISC0_DEV_MODE=1 \
+      {{lee_test}} e1b_two_instances -- --ignored --nocapture 2>&1 \
+      | grep -E '^E1B|^test |test result' | tee {{results}}/e1b-instances-dev.log
+
 # E1b, real proof of real mainnet update `step` (CPU, via r0vm)
 e1b-prove step="1": lez e1b-inputs e1b-elf
     mkdir -p {{results}}
@@ -114,7 +121,7 @@ e1c-prove burn="1000": lez
       | grep -E '^E1C|^test |test result|panicked' | tee {{results}}/e1c-prove.log
 
 # All dev-mode runs (minutes)
-all: e1a e1b e1b-window e1c
+all: e1a e1b e1b-window e1b-instances e1c
 
 # Remove .work/
 clean:

@@ -19,10 +19,10 @@ index 7207ea0..3c7f751 100644
          Program::new_unchecked(
 diff --git a/lee/state_machine/src/state/tests/lc_spike.rs b/lee/state_machine/src/state/tests/lc_spike.rs
 new file mode 100644
-index 0000000..96d0b8a
+index 0000000..5919978
 --- /dev/null
 +++ b/lee/state_machine/src/state/tests/lc_spike.rs
-@@ -0,0 +1,482 @@
+@@ -0,0 +1,579 @@
 +//! E1a: can a light-client update run in LEZ's proven (private) mode and
 +//! advance a public instance, and what does the sequencer meter for it?
 +
@@ -495,6 +495,103 @@ index 0000000..96d0b8a
 +        assert_eq!(t.response.events.len(), 1);
 +        println!("E1B attest: open window, one attestation event");
 +    }
++}
++
++#[test]
++#[ignore = "needs E1B_ELF and E1B_DIR"]
++fn e1b_two_instances() {
++    let elf = env_path("E1B_ELF");
++    let dir = std::path::PathBuf::from(std::env::var("E1B_DIR").unwrap());
++    let read = |name: &str| std::fs::read(dir.join(name)).unwrap();
++    let stale = |n: u8| -> u64 {
++        String::from_utf8(read(&format!("stale-{n}.txt")))
++            .unwrap()
++            .trim()
++            .parse()
++            .unwrap()
++    };
++    let update_tag: u8 = std::env::var("E1B_UPDATE_TAG").map_or(0, |t| t.parse().unwrap());
++    let image_id: ProgramId = risc0_zkvm::compute_image_id(&elf).unwrap().into();
++    let program = Program::new_unchecked(image_id, std::borrow::Cow::Owned(elf));
++    let program_id = AccountId::from_builtin_program(program.id());
++    const A: AccountId = AccountId::new([42; 32]);
++    const B: AccountId = AccountId::new([43; 32]);
++    let (store_a, store_b) = (read("store-1.bin"), read("store-2.bin"));
++    let keys = test_private_account_keys_1();
++    let account_id = AccountId::for_regular_private_account(&keys.npk(), &keys.vpk());
++    let pre_account = Account::funded(100);
++    let mut base = V03State::new()
++        .with_programs([program.clone()])
++        .with_private_account(&keys, &pre_account);
++    base.force_insert_account(
++        A,
++        Account::default().with_actor_state(program_id, store_a.clone().into()),
++    );
++    base.force_insert_account(
++        B,
++        Account::default().with_actor_state(program_id, store_b.clone().into()),
++    );
++    let held = |s: &V03State, id: AccountId| {
++        s.get_account_by_id(id)
++            .data
++            .actor_state(program_id)
++            .as_ref()
++            .to_vec()
++    };
++    let prove = |target: AccountId, input: Vec<u8>| {
++        let instance = Actor::new(target, program_id);
++        let message = tagged(update_tag, &(instance, input));
++        let membership_proof = base
++            .get_proof_for_commitment(&Commitment::new(&account_id, &pre_account))
++            .unwrap();
++        let proving = ProvingInput {
++            public_context: Ctx::new(vec![instance], []),
++            private_witnesses: vec![update_witness(&keys, pre_account.clone(), membership_proof)],
++            ..proving_input(root(
++                Actor::new(account_id, program_id),
++                &RawMessage(message),
++            ))
++        };
++        execute_and_prove_with_cross_messages(
++            proving,
++            vec![Vec::new()],
++            &ProgramCatalog::from([(program_id, program.clone())]),
++            |_| SenderPresentation::Blinded([9; 32]),
++            |_, _| false,
++            no_seal,
++        )
++        .map(|proven| private_tx(proven, vec![], &[]))
++    };
++    let at = stale(1).min(stale(2)) - 1;
++
++    // An update for A advances A only.
++    let tx = prove(A, read("step-1.bin")).expect("A's update proves");
++    let mut s = base.clone();
++    s.transition_from_privacy_preserving_transaction(&tx, 1, at)
++        .expect("A advances");
++    assert_ne!(held(&s, A), store_a);
++    assert_eq!(held(&s, B), store_b);
++
++    // An update for B advances B only.
++    let tx = prove(B, read("step-2.bin")).expect("B's update proves");
++    let mut s = base.clone();
++    s.transition_from_privacy_preserving_transaction(&tx, 1, at)
++        .expect("B advances");
++    assert_eq!(held(&s, A), store_a);
++    assert_ne!(held(&s, B), store_b);
++
++    // A's update input sent to B: B refuses it, and neither instance moves.
++    let mut s = base.clone();
++    let cross = prove(B, read("step-1.bin"))
++        .map_err(|e| format!("{e:?}"))
++        .and_then(|tx| {
++            s.transition_from_privacy_preserving_transaction(&tx, 1, at)
++                .map_err(|e| format!("{e:?}"))
++        });
++    assert!(cross.is_err(), "B accepted A's update");
++    assert_eq!(held(&s, A), store_a);
++    assert_eq!(held(&s, B), store_b);
++    println!("E1B two instances: each update advances only its instance; A's input on B refused");
 +}
 +
 +/// A message given as its encoded bytes.

@@ -190,6 +190,19 @@ weak-subjectivity period). Default mainnet endpoints:
 over plain http only, so a network path can alter their answers. They are
 weaker independent sources than the https ones. Add your own node to the set.
 
+## Multiple instances
+
+One program serves many instances. Each instance is its own LEZ account with
+its own config, checkpoint and store. `Update` names its target instance, and
+`Advance` applies only on top of the store that the instance holds. So an
+update built for one instance is refused by every other instance
+(`just e1b-instances` in `rfp-021/e1`).
+
+A `HeaderRecord` binds `chain_id`, so a record matches claims on its own
+chain only. Two instances on the same chain can produce equal records. A
+consumer binds to an instance by its account id: it reads that
+account, or accepts an attestation only from that sender.
+
 ## Tests
 
 ```console
