@@ -108,7 +108,10 @@ mod tests {
     use alloc::vec::Vec;
     use blst::min_pk::SecretKey;
 
-    use crate::profile::mainnet;
+    use crate::config::ChainConfig;
+    fn mainnet() -> ChainConfig {
+        ChainConfig::mainnet()
+    }
 
     fn keys(n: usize) -> Vec<SecretKey> {
         (0..n)

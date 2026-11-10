@@ -48,11 +48,13 @@ pub use types::*;
 /// Errors of the light-client core. Each variant names the rule that failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The chain config differs from every pinned profile.
-    ProfileMismatch,
+    /// The config's preset differs from the pinned preset.
+    PresetMismatch,
+    /// The config's chain identity fails the structural checks of `check_profile`.
+    InvalidChainIdentity,
     /// The header slot falls before Capella.
     UnsupportedFork,
-    /// The header variant differs from the fork at its own slot.
+    /// The header variant is invalid at the fork of its own slot.
     HeaderVariant,
     /// The header fails `is_valid_light_client_header`.
     InvalidHeader,
@@ -100,9 +102,9 @@ pub enum Error {
     NoProgress,
     /// The transition would skip a sync committee period.
     PeriodSkip,
-    /// A Gloas header needs the RLP preimage of its execution block.
+    /// A Gloas-variant header needs the RLP preimage of its execution block.
     MissingExecutionPreimage,
-    /// A pre-Gloas header takes its anchor from the payload header; a preimage is extra input.
+    /// A Capella or Deneb variant takes its anchor from the payload header; a preimage is extra input.
     UnexpectedExecutionPreimage,
     /// The preimage hash differs from the execution block hash.
     ExecutionHashMismatch,

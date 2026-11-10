@@ -6,7 +6,9 @@ use eth_lc_core::claim::{
     Attestation, Claim, Condition, Evidence, Field, HeaderRecord, Op, Subject,
 };
 use eth_lc_core::crypto::sha256;
-use eth_lc_core::profile::mainnet;
+fn mainnet() -> ChainConfig {
+    ChainConfig::mainnet()
+}
 use eth_lc_core::*;
 
 fn digest<T: BorshSerialize>(v: &T) -> String {

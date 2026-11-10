@@ -13,9 +13,11 @@ that form.
 
 | Item | Use |
 |---|---|
-| `ChainConfig`, `profile::mainnet()`, `check_profile` | Chain parameters. Only pinned profiles pass. |
-| `initialize_store(cfg, &BootstrapInput)` | `initialize_light_client_store` plus the profile check and the execution anchor. The only way to anchor a store. |
+| `ChainConfig`, `check_profile` | Chain parameters. The preset is pinned (mainnet preset); the chain identity comes from `Init` and passes structural checks. |
+| `ChainConfig::mainnet()`, `sepolia()`, `hoodi()` | Constructors with each chain's values, cross-checked against recorded Beacon API responses. They are conveniences: any chain of the pinned preset passes the same checks. |
+| `initialize_store(cfg, &BootstrapInput)` | `initialize_light_client_store` plus the config check and the execution anchor. The only way to anchor a store. |
 | `apply_update(cfg, &store, &UpdateInput)` | Guest entry: one strict store transition. |
+| `get_lc_execution_root(cfg, &header)` | The spec's execution root of a header, at the fork of its own slot. |
 | `validate_light_client_update(..., current_slot)` | The full spec check, read-only. For parity tests and off-chain callers. |
 | `stale_after_ms(cfg, &store)` | Liveness bound: the time at which the store stalls. |
 | `claim::check_claim(&record, &claim)` | Checks account, storage and receipt-log claims against a `HeaderRecord`. |
@@ -26,10 +28,18 @@ the committee aggregate and of each non-signer). `eth-lc-host` builds them.
 
 ## Trust model
 
-- Safety rests on two inputs: the trusted checkpoint behind `initialize_store`,
-  and an honest supermajority of each sync committee the store accepts as
-  signer. `initialize_store` and `apply_update` also check the config against a
-  pinned profile.
+- Safety rests on two inputs: the `Init` anchor (the chain config and the
+  trusted checkpoint behind `initialize_store`), and an honest supermajority of
+  each sync committee the store accepts as signer.
+- `initialize_store` and `apply_update` pin the preset (mainnet preset: 12 s
+  slots, 32 slots per epoch, 256 epochs per sync committee period, 512
+  members) and check the chain identity for structure only: nonzero chain id
+  and genesis validators root, one fork entry each from phase0 through Gloas,
+  phase0 at epoch 0, non-decreasing epochs, Capella scheduled, distinct fork
+  versions. The same program therefore serves any chain of that preset. The
+  identity values are part of the trust anchor: verify them against the chain
+  with `eth_lc_host::checkpoint::verify_instance_config`. The state bytes keep
+  the config, and `Advance` keeps it byte-identical.
 - The LEZ sequencer timestamp is a liveness input only. Safety holds for any timestamp.
 - The store accepts an update signed by the next committee only when its
   finalized header is also in the next period. That update rotates the
@@ -89,6 +99,8 @@ fn handle(input: &ReceiveInput) -> Response {
             let update: UpdateInput = borsh::from_slice(rest).expect("update input");
             let next_store = apply_update(&cfg, &store, &update).expect("the update verifies");
             let next = borsh::to_vec(&(&cfg, &next_store)).expect("state encodes");
+            let cfg_len = borsh::to_vec(&cfg).expect("config encodes").len();
+            assert_eq!(next[..cfg_len], prev[..cfg_len], "config changed");
             Response::keep_state()
                 .send_sync(instance, &LcMsg::Advance { prev, next })
                 .timestamp_window(..stale_after_ms(&cfg, &store))
@@ -117,6 +129,12 @@ Notes:
   stalled instance keeps serving claims against the headers it recorded.
 - Execution block numbers can repeat at Gloas (two beacon slots can name the
   same parent block). Key header records by beacon slot.
+- A Gloas-variant header needs the RLP execution header of its
+  `execution_block_hash` in the input, at any slot. A Gloas-layout header at
+  a pre-Gloas slot (the Gloas upgrade of an older header,
+  `specs/gloas/light-client/fork.md`) names its own payload block, proven at
+  gindex 412 (Capella) or 812 (Deneb through Fulu). Its anchor is the same
+  block that the older layout anchors.
 
 ## Claims
 
@@ -133,14 +151,15 @@ Notes:
 ## Stalls and migration
 
 See the workspace README: a stalled instance stays readable, and recovery is a
-new instance anchored at a checkpoint that `eth_lc_host::checkpoint::verify_new_checkpoint` accepts.
+new instance anchored at a chain config and a checkpoint that
+`eth_lc_host::checkpoint::verify_new_checkpoint` accepts.
 
 ## Features
 
 | Feature | Use |
 |---|---|
 | `std` (default) | `std::error::Error` for `Error`. Guests turn it off. |
-| `minimal-profile` | The minimal-preset profile for conformance tests. |
+| `minimal-profile` | The minimal preset as a second pinned preset, and `ChainConfig::minimal`, for conformance tests. |
 | `spec-oracle` | Exposes the spec transition (`oracle::apply_light_client_update`) to host tests. |
 
 The crate refuses `minimal-profile` and `spec-oracle` on `target_os = "zkvm"`.

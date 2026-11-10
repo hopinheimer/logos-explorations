@@ -111,7 +111,10 @@ pub fn compute_signing_root(object_root: &Root, domain: &Root) -> Root {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::mainnet;
+    use crate::config::ChainConfig;
+    fn mainnet() -> ChainConfig {
+        ChainConfig::mainnet()
+    }
 
     #[test]
     fn slot_period_math() {
