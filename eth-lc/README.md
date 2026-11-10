@@ -13,10 +13,13 @@ Spec sources: consensus-specs tag `v1.7.0-beta.4`; Yellow Paper (App. B, App. D,
 ## Versioning
 
 Releases are git tags `eth-lc-vX.Y.Z` on this repository. While at 0.x, a
-change of a borsh layout (`eth-lc-core/tests/borsh_golden.rs`) or of a pinned
-chain profile bumps the minor version. A new fork schedule (for example a real
-Gloas epoch on mainnet) ships as a new crate version, a new program and a new
-instance.
+change of a borsh layout (`eth-lc-core/tests/borsh_golden.rs`) or of the
+pinned preset bumps the minor version. The chain identity (chain id, genesis,
+fork schedule) comes from each instance's `Init`, so one program serves
+mainnet, Sepolia, Hoodi and any other chain of the mainnet preset. A new fork
+schedule for a chain (for example a real Gloas epoch on mainnet) is a new
+instance with an `Init` that carries it. A fork after Gloas needs a new crate
+version and a new program.
 
 ## Using the crates
 
@@ -104,6 +107,22 @@ for update in dir.all_updates() {
 }
 ```
 
+## Trust anchor: config and checkpoint
+
+An instance's `Init` carries two trust inputs: the chain config and the
+checkpoint. The core pins the preset and checks the chain identity for
+structure only, so the operator verifies the identity values against the
+chain:
+
+- `verify_instance_config(cfg, beacon_endpoints, rpc_endpoints, policy)`
+  compares the genesis validators root, the genesis time, the preset fields
+  and every fork version and epoch (phase0 through Gloas) with each Beacon
+  API endpoint's `/eth/v1/beacon/genesis` and `/eth/v1/config/spec`, and the
+  chain id with each execution endpoint's `eth_chainId`. Every answering
+  endpoint must agree.
+- `verify_new_checkpoint` runs `verify_instance_config` first, then checks the
+  checkpoint (below).
+
 ## Stalls and migration
 
 An instance stalls when a full sync committee period passes with zero
@@ -122,31 +141,66 @@ Migrate:
 
 1. Take the current finalized root from one endpoint.
 2. Run `verify_new_checkpoint` against at least three independent endpoints
-   (`just verify-checkpoint`, or `fetch_chain verify-checkpoint --endpoint URL ...`).
+   (`just verify-checkpoint`, or `fetch_chain verify-checkpoint --endpoint URL ... --rpc URL`).
+   It verifies the chain config and the checkpoint together.
    Choose endpoints run by independent parties: the check confirms agreement;
    independence is your responsibility.
 3. Deploy a new instance and send `Init` with the returned `BootstrapInput`.
 4. Point consumers at the new instance id. Keep the old id for claims against
    headers the old instance recorded.
 
-`verify_new_checkpoint` accepts a root only when every answering endpoint
-reports the same genesis validators root, reports the root as canonical and
-finalized, and serves the same bootstrap; when `initialize_store` succeeds
-locally; and when the checkpoint is at most 256 epochs old (the floor of the
-weak-subjectivity period). Default endpoints:
+`verify_new_checkpoint` accepts a root only when `verify_instance_config`
+accepts the config; every answering endpoint reports the root as canonical
+and finalized and serves the same bootstrap; for a Gloas-variant bootstrap
+header, an execution endpoint serves the RLP header of its
+`execution_block_hash` (checked by Keccak-256); `initialize_store` succeeds
+locally; and the checkpoint is at most 256 epochs old (the floor of the
+weak-subjectivity period). Default mainnet endpoints:
 `https://ethereum-beacon-api.publicnode.com`,
-`https://lodestar-mainnet.chainsafe.io`, `https://www.lightclientdata.org`.
+`https://lodestar-mainnet.chainsafe.io`,
+`http://unstable.mainnet.beacon-api.nimbus.team`, and
+`https://ethereum-rpc.publicnode.com` for execution. Sepolia
+(`--network sepolia --min 2`): `https://lodestar-sepolia.chainsafe.io`,
+`http://unstable.sepolia.beacon-api.nimbus.team`, and
+`https://ethereum-sepolia-rpc.publicnode.com`. The Nimbus endpoints answer
+over plain http only, so a network path can alter their answers. They are
+weaker independent sources than the https ones. Add your own node to the set.
 
 ## Tests
 
 ```console
 cd eth-lc
-just test          # unit tests, cross-checks, recorded mainnet chain, synthetic cases
-just spec-tests    # consensus-specs light-client vectors (downloads about 1.4 GB once)
-just eth-tests     # ethereum/tests TrieTests
-just lc-test       # integration tests with output
-just vectors       # re-record the mainnet chain-dir and evidence
+just test            # unit tests, cross-checks, recorded mainnet and Sepolia chains, synthetic cases
+just spec-tests      # consensus-specs light-client vectors (downloads about 1.4 GB once)
+just eth-tests       # ethereum/tests TrieTests
+just lc-test         # integration tests with output
+just live-test       # a live Sepolia Gloas checkpoint (network)
+just consumer-check  # README guest example as a git dependency, built and run under the LEZ executor
+just vectors         # re-record the mainnet and Sepolia chain-dirs and the evidence
 ```
 
-Recorded data lives in `vectors/mainnet/` (chain-dir for periods 1902 to 1905,
-a finality update, and claim evidence).
+Conformance at consensus-specs `v1.7.0-beta.4` (`just spec-tests`):
+
+- `sync`: all 33 minimal-preset cases from Capella through Gloas (129 steps;
+  the pin ships sync vectors for the minimal preset only). The test-only spec store
+  passes every step. The strict store runs on every case, Gloas bootstraps
+  included: 56 accepted steps, each equal to the spec store (finalized header,
+  both committee roots, execution anchor); 10 accept-rule refusals, each
+  justified by an independent check; 15 steps after the spec force updates
+  of the 5 `light_client_sync` cases, checked against the strict model.
+  Gloas anchors use execution preimages that the test derives (from payload
+  headers in the vectors, or from the genesis payload of the pyspec test
+  helper) and checks by Keccak-256.
+- `single_merkle_proof`: 52 proofs; every leaf index equals the core gindex.
+- ethereum/tests `TrieTests` (`just eth-tests`): 5 files.
+
+Recorded data:
+
+- `vectors/mainnet/`: chain-dir for periods 1902 to 1905, a finality update,
+  claim evidence, a checkpoint, the Beacon API config and genesis.
+- `vectors/sepolia/`: chain-dir for periods 1376 to 1380 across the Gloas fork
+  (epoch 353,024, the first slot of period 1379) with the RLP execution header
+  of every finalized header, a Gloas checkpoint, the Beacon API config and
+  genesis. `tests/sepolia.rs` replays it with real BLS, and replays its Fulu
+  objects again after the Gloas upgrade (`fork.md`) to the same stores.
+- `vectors/hoodi/`: the Beacon API config and genesis (Gloas unscheduled).

@@ -43,16 +43,22 @@ eth-tests:
     done
     SPEC_DATA="{{data}}" cargo test -p eth-lc-host --test trie_tests -- --nocapture
 
-# Light-client integration: recorded mainnet chain and claims, synthetic forks, real anchors, cross-checks
+# Light-client integration: recorded mainnet and Sepolia chains, claims, synthetic forks, real anchors, cross-checks
 lc-test:
-    cargo test -p eth-lc-host --test mainnet --test synthetic --test anchor_real --test merkle_xcheck --test mpt_xcheck --test checkpoint -- --nocapture
+    cargo test -p eth-lc-host --test mainnet --test sepolia --test synthetic --test anchor_real --test merkle_xcheck --test mpt_xcheck --test checkpoint -- --nocapture
 
-# Re-record the mainnet chain-dir (periods 1902 to 1905) and the claim evidence
+# Re-record the mainnet chain-dir (periods 1902 to 1905), the claim evidence, and the Sepolia
+# chain-dir across the Gloas fork (periods 1376 to 1380)
 vectors:
     cargo run -p eth-lc-host --bin fetch_chain -- mainnet vectors/mainnet --period 1902 --count 4
     cargo run -p eth-lc-host --bin fetch_evidence -- vectors/mainnet/evidence
+    cargo run -p eth-lc-host --bin fetch_chain -- sepolia vectors/sepolia --period 1376 --count 5 --no-finality-update
 
-# Check a new-instance checkpoint against the default endpoints
+# Live checks against public endpoints: a Sepolia Gloas checkpoint (config, bootstrap, execution header)
+live-test:
+    cargo test -p eth-lc-host --test checkpoint sepolia_live -- --ignored --nocapture
+
+# Check a new instance's config and checkpoint (`--network sepolia --min 2` for Sepolia)
 verify-checkpoint *args:
     cargo run -p eth-lc-host --bin fetch_chain -- verify-checkpoint {{args}}
 
@@ -62,7 +68,10 @@ risc0_cc := env("RISC0_CC", home_directory() / ".risc0/cpp/bin/riscv32-unknown-e
 risc0_ar := parent_directory(risc0_cc) / "riscv32-unknown-elf-ar"
 
 # Consumer check: a git dependency on a bare clone of this working tree (committed in a
-# temporary clone only), the README guest example built with the rzup toolchain, patch-free manifest
+# temporary clone only), the README guest example built with the rzup toolchain, patch-free manifest.
+# Then the example runs under the LEZ executor (dev mode, `rfp-021/e1` recipe `window-test`):
+# `Update` on step 1 inside its window, a trailing byte refused, inclusion at `stale_after_ms`
+# refused, `Attest` with an open window.
 consumer-check:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -100,4 +109,9 @@ consumer-check:
       CC_riscv32im_risc0_zkvm_elf="{{risc0_cc}}" AR_riscv32im_risc0_zkvm_elf="{{risc0_ar}}" CFLAGS_riscv32im_risc0_zkvm_elf="-march=rv32im -nostdlib" \
       cargo build --release --target riscv32im-risc0-zkvm-elf
     ls -la target/riscv32im-risc0-zkvm-elf/release/consumer-guest
+    e1="$repo/rfp-021/e1"
+    cargo run -q --release --manifest-path "$e1/e1b-pack/Cargo.toml" -- \
+      target/riscv32im-risc0-zkvm-elf/release/consumer-guest "$tmp/consumer.bin"
+    # `LcMsg` of the example: Init = 0, Update = 1, Advance = 2, Attest = 3.
+    just -f "$e1/justfile" window-test "$tmp/consumer.bin" 1 3
     rm -rf "$tmp"

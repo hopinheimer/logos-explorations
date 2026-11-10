@@ -4,15 +4,12 @@ Host-side support for `eth-lc-core`.
 
 | Module or binary | Use |
 |---|---|
-| `forks` | Light-client containers per fork layout (Capella, Deneb, Electra and Fulu, Gloas), from Beacon API JSON or SSZ, converted to core types. Each header becomes the core variant of the fork at its own slot. |
-| `chain_dir` | `ChainDir::load(dir)`: a recorded bootstrap, period updates and a finality update; `update_input` builds the guest input. |
+| `forks` | Light-client containers per fork layout (Capella, Deneb, Electra and Fulu, Gloas), from Beacon API JSON or SSZ, converted to core types, and the Gloas upgrade functions of `specs/gloas/light-client/fork.md`. A Capella or Deneb layout becomes the core variant of the fork at its own slot; a Gloas layout becomes a Gloas header at any slot from Capella on. |
+| `chain_dir` | `ChainDir::load(dir)`: a recorded bootstrap, period updates, a finality update and RLP execution headers; `update_input` builds the guest input, with the RLP header a Gloas-variant finalized header needs. |
 | `hints` | `key_hints(committee, bits)`: the uncompressed aggregate and non-signer keys. |
-| `checkpoint` | `stall_status` and `verify_new_checkpoint` for new instances. |
+| `checkpoint` | `stall_status`; `verify_instance_config` (chain config against Beacon API and execution endpoints) and `verify_new_checkpoint` (config, then checkpoint, with the RLP header of a Gloas bootstrap) for new instances. |
+| `execution` | RLP execution headers from JSON-RPC block objects, checked by Keccak-256. |
 | `evidence` | `eth_getProof` results and receipt trie proofs as `Evidence`. |
 | `synthetic` | Test-key committees, consistent branches and signed updates for any supported fork. |
-| `fetch_chain` | Records a mainnet chain-dir; `verify-checkpoint` checks a checkpoint against three endpoints. |
+| `fetch_chain` | Records a mainnet or Sepolia chain-dir; `verify-checkpoint` checks a config and a checkpoint against the endpoints. |
 | `fetch_evidence` | Records claim evidence at the finalized block of the latest finality update. |
-
-`forks::to_core_header` refuses a Gloas-layout header at a pre-Gloas slot:
-the Gloas layout drops the payload header that the older variants carry. Updates whose attested and finalized
-headers sit on both sides of the Gloas fork therefore fail to convert.
