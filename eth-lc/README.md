@@ -140,7 +140,7 @@ before a qualifying update arrives.
 Migrate:
 
 1. Take the current finalized root from one endpoint.
-2. Run `verify_new_checkpoint` against at least three independent endpoints
+2. Run `verify_new_checkpoint` against at least two independent endpoints
    (`just verify-checkpoint`, or `fetch_chain verify-checkpoint --endpoint URL ... --rpc URL`).
    It verifies the chain config and the checkpoint together.
    Choose endpoints run by independent parties: the check confirms agreement;
@@ -179,16 +179,19 @@ and finalized and serves the same bootstrap; for a Gloas-variant bootstrap
 header, an execution endpoint serves the RLP header of its
 `execution_block_hash` (checked by Keccak-256); `initialize_store` succeeds
 locally; and the checkpoint is at most 256 epochs old (the floor of the
-weak-subjectivity period). Default mainnet endpoints:
+weak-subjectivity period). Default mainnet endpoints, all over https, with
+at least 2 Beacon API answers required:
 `https://ethereum-beacon-api.publicnode.com`,
-`https://lodestar-mainnet.chainsafe.io`,
-`http://unstable.mainnet.beacon-api.nimbus.team`, and
+`https://lodestar-mainnet.chainsafe.io`, and
 `https://ethereum-rpc.publicnode.com` for execution. Sepolia
-(`--network sepolia --min 2`): `https://lodestar-sepolia.chainsafe.io`,
-`http://unstable.sepolia.beacon-api.nimbus.team`, and
-`https://ethereum-sepolia-rpc.publicnode.com`. The Nimbus endpoints answer
-over plain http only, so a network path can alter their answers. They are
-weaker independent sources than the https ones. Add your own node to the set.
+(`--network sepolia`): `https://lodestar-sepolia.chainsafe.io`, one
+operator, with a minimum of 1, and `https://ethereum-sepolia-rpc.publicnode.com`
+for execution. It is the one public https Sepolia endpoint that serves the
+light-client API. For a second Sepolia source, add your own node.
+A root counts as finalized when the header response says `finalized: true`
+or when it is the endpoint's finalized checkpoint
+(`/eth/v1/beacon/states/head/finality_checkpoints`); Lodestar reports the
+second form.
 
 ## Multiple instances
 

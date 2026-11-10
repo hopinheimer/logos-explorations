@@ -14,7 +14,8 @@
 //!     network N (default mainnet) against the endpoints (default: the
 //!     network's default endpoints) for `root` (default: the first
 //!     endpoint's finalized root) and prints the verified root. `--min`
-//!     sets the number of endpoints that must answer (default 3).
+//!     sets the number of endpoints that must answer (default 2 on
+//!     mainnet, 1 on Sepolia).
 //! ```
 
 use std::path::PathBuf;
@@ -233,11 +234,9 @@ fn verify(args: &[String]) -> Result<()> {
     if endpoints.is_empty() {
         endpoints = match network.as_str() {
             "mainnet" => DEFAULT_ENDPOINTS.iter().map(|s| s.to_string()).collect(),
-            // Two operators and two clients that serve Gloas bootstraps.
-            _ => vec![
-                beacon.to_string(),
-                "http://unstable.sepolia.beacon-api.nimbus.team".to_string(),
-            ],
+            // ChainSafe is the one public https Sepolia endpoint with the
+            // light-client API: a quorum of one operator.
+            _ => vec![beacon.to_string()],
         };
     }
     let mut rpc_urls = flag(args, "--rpc");
@@ -249,6 +248,9 @@ fn verify(args: &[String]) -> Result<()> {
         });
     }
     let mut policy = CheckpointPolicy::default();
+    if network != "mainnet" {
+        policy.min_endpoints = 1;
+    }
     if let Some(n) = flag(args, "--min").pop() {
         policy.min_endpoints = n.parse()?;
     }

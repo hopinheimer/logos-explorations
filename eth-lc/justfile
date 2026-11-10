@@ -58,7 +58,7 @@ vectors:
 live-test:
     cargo test -p eth-lc-host --test checkpoint sepolia_live -- --ignored --nocapture
 
-# Check a new instance's config and checkpoint (`--network sepolia --min 2` for Sepolia)
+# Check a new instance's config and checkpoint (`--network sepolia` for Sepolia)
 verify-checkpoint *args:
     cargo run -p eth-lc-host --bin fetch_chain -- verify-checkpoint {{args}}
 

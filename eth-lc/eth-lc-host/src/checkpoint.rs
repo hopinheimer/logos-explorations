@@ -23,15 +23,11 @@ use crate::execution::fetch_header_rlp;
 use crate::forks::{self, json_to_ssz, Kind, Preset, Wire};
 use crate::http::{get_json, rpc};
 
-/// Default mainnet Beacon API endpoints for checkpoint checks.
-///
-/// The Nimbus endpoint answers over plain http only. A network path can alter
-/// its answers, so it is a weaker independent source than the two https ones.
-/// Operators should add their own node.
-pub const DEFAULT_ENDPOINTS: [&str; 3] = [
+/// Default mainnet Beacon API endpoints for checkpoint checks: two operators,
+/// both over https. Operators should add their own node.
+pub const DEFAULT_ENDPOINTS: [&str; 2] = [
     "https://ethereum-beacon-api.publicnode.com",
     "https://lodestar-mainnet.chainsafe.io",
-    "http://unstable.mainnet.beacon-api.nimbus.team",
 ];
 
 /// Default mainnet execution JSON-RPC endpoint for `eth_chainId` and execution headers.
@@ -85,7 +81,7 @@ pub struct CheckpointPolicy {
 impl Default for CheckpointPolicy {
     fn default() -> Self {
         Self {
-            min_endpoints: 3,
+            min_endpoints: 2,
             max_age_epochs: 256,
         }
     }
@@ -225,17 +221,28 @@ struct Answer {
     genesis: Value,
     header: Value,
     bootstrap: Value,
+    /// `finalized.root` of `/eth/v1/beacon/states/head/finality_checkpoints`,
+    /// asked only when the header response leaves `finalized` unset or false.
+    finalized_checkpoint: Option<String>,
 }
 
 fn ask(endpoint: &str, root_hex: &str) -> anyhow::Result<Answer> {
+    let header = get_json(endpoint, &format!("/eth/v1/beacon/headers/{root_hex}"))?;
+    // Lodestar sets `finalized: false` on the header of the finalized checkpoint
+    // itself; its checkpoint response names the root.
+    let finalized_checkpoint = (header["finalized"] != Value::Bool(true))
+        .then(|| get_json(endpoint, "/eth/v1/beacon/states/head/finality_checkpoints").ok())
+        .flatten()
+        .and_then(|c| c["data"]["finalized"]["root"].as_str().map(str::to_string));
     Ok(Answer {
         endpoint: endpoint.to_string(),
         genesis: get_json(endpoint, "/eth/v1/beacon/genesis")?,
-        header: get_json(endpoint, &format!("/eth/v1/beacon/headers/{root_hex}"))?,
+        header,
         bootstrap: get_json(
             endpoint,
             &format!("/eth/v1/beacon/light_client/bootstrap/{root_hex}"),
         )?,
+        finalized_checkpoint,
     })
 }
 
@@ -244,9 +251,11 @@ fn ask(endpoint: &str, root_hex: &str) -> anyhow::Result<Answer> {
 ///
 /// Succeeds only when: [`verify_instance_config`] succeeds; at least
 /// `min_endpoints` endpoints answer; each reports `root` as canonical and
-/// finalized; all serve the same bootstrap (compared as SSZ bytes); for a
-/// Gloas-variant bootstrap header, an execution endpoint serves the RLP
-/// header of its `execution_block_hash` (checked by Keccak-256);
+/// finalized (the header response says `finalized: true`, or `root` is the
+/// endpoint's finalized checkpoint); all serve the same bootstrap (compared
+/// as SSZ bytes); for a Gloas-variant bootstrap header, an execution endpoint
+/// serves the RLP header of its `execution_block_hash` (checked by
+/// Keccak-256);
 /// `initialize_store` succeeds locally; and the checkpoint is at most
 /// `max_age_epochs` old at `now_ms`.
 pub fn verify_new_checkpoint(
@@ -281,7 +290,9 @@ pub fn verify_new_checkpoint(
             return Err(CheckpointError::GenesisMismatch { endpoint });
         }
         let h = &a.header;
-        if h["finalized"] != Value::Bool(true)
+        let finalized = h["finalized"] == Value::Bool(true)
+            || a.finalized_checkpoint.as_deref() == Some(root_hex.as_str());
+        if !finalized
             || h["data"]["canonical"] != Value::Bool(true)
             || h["data"]["root"].as_str() != Some(root_hex.as_str())
         {

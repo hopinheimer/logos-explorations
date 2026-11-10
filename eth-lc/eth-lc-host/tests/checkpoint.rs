@@ -54,6 +54,8 @@ struct Responses {
     spec: Value,
     header: Value,
     bootstrap: Value,
+    /// `/eth/v1/beacon/states/head/finality_checkpoints`, when served.
+    finality: Option<Value>,
 }
 
 impl Responses {
@@ -64,6 +66,7 @@ impl Responses {
             spec: recorded(chain, "config-spec.json"),
             header: recorded(chain, "checkpoint/header.json"),
             bootstrap: recorded(chain, "checkpoint/bootstrap.json"),
+            finality: None,
         }
     }
 }
@@ -108,6 +111,12 @@ fn serve_with(route: impl Fn(&str, &str, &str) -> Option<String> + Send + 'stati
 }
 
 fn serve(r: Responses) -> String {
+    let finality = r.finality.map(|f| {
+        (
+            "/eth/v1/beacon/states/head/finality_checkpoints".to_string(),
+            f.to_string(),
+        )
+    });
     let routes: HashMap<String, String> = [
         ("/eth/v1/beacon/genesis".to_string(), r.genesis.to_string()),
         ("/eth/v1/config/spec".to_string(), r.spec.to_string()),
@@ -121,6 +130,7 @@ fn serve(r: Responses) -> String {
         ),
     ]
     .into_iter()
+    .chain(finality)
     .collect();
     serve_with(move |_, path, _| routes.get(path).cloned())
 }
@@ -329,13 +339,14 @@ fn instance_config_refuses_any_field_mismatch() {
 }
 
 #[test]
-fn two_endpoints_fail() {
+fn one_endpoint_fails() {
     let r = Responses::recorded(&MAINNET);
+    assert!(run(vec![r.clone(), r.clone()], now(&MAINNET)).is_ok());
     assert!(matches!(
-        run(vec![r.clone(), r], now(&MAINNET)),
+        run(vec![r], now(&MAINNET)),
         Err(CheckpointError::TooFewEndpoints {
-            answered: 2,
-            required: 3
+            answered: 1,
+            required: 2
         })
     ));
 }
@@ -358,6 +369,25 @@ fn non_finalized_root_fails() {
     other.header["finalized"] = Value::Bool(false);
     assert!(matches!(
         run(vec![r.clone(), other, r], now(&MAINNET)),
+        Err(CheckpointError::NotFinalized { .. })
+    ));
+}
+
+/// Lodestar's form: `finalized: false` on the header, the root named by the
+/// endpoint's finalized checkpoint.
+#[test]
+fn root_named_by_finality_checkpoints_passes() {
+    let r = Responses::recorded(&MAINNET);
+    let mut lodestar = r.clone();
+    lodestar.header["finalized"] = Value::Bool(false);
+    lodestar.finality = Some(json!({"data": {"finalized": {"epoch": "1", "root": MAINNET.root}}}));
+    assert!(run(vec![r.clone(), lodestar.clone()], now(&MAINNET)).is_ok());
+    let mut other = lodestar;
+    other.finality = Some(
+        json!({"data": {"finalized": {"epoch": "1", "root": format!("0x{}", "11".repeat(32))}}}),
+    );
+    assert!(matches!(
+        run(vec![r, other], now(&MAINNET)),
         Err(CheckpointError::NotFinalized { .. })
     ));
 }
@@ -404,10 +434,7 @@ fn age_of_257_epochs_fails() {
 #[ignore = "network: public Sepolia endpoints"]
 fn sepolia_live() {
     let cfg = ChainConfig::sepolia();
-    let endpoints = vec![
-        "https://lodestar-sepolia.chainsafe.io".to_string(),
-        "http://unstable.sepolia.beacon-api.nimbus.team".to_string(),
-    ];
+    let endpoints = vec!["https://lodestar-sepolia.chainsafe.io".to_string()];
     let rpcs = vec!["https://ethereum-sepolia-rpc.publicnode.com".to_string()];
     let root = eth_lc_host::http::get_json(&endpoints[0], "/eth/v1/beacon/headers/finalized")
         .unwrap()["data"]["root"]
@@ -415,7 +442,7 @@ fn sepolia_live() {
         .map(|r| parse_root(r).unwrap())
         .unwrap();
     let policy = CheckpointPolicy {
-        min_endpoints: 2,
+        min_endpoints: 1,
         ..Default::default()
     };
     let now_ms = std::time::SystemTime::now()
