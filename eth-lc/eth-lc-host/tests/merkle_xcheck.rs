@@ -1,7 +1,7 @@
 //! Cross-check of core SSZ roots against `tree_hash` on the host containers.
 
 use alloy_primitives::{Address, B256, U256};
-use eth_lc_core::{profile, LightClientHeader};
+use eth_lc_core::{ChainConfig, LightClientHeader};
 use eth_lc_host::forks::{
     self, Bootstrap, ExecutionPayloadHeaderCapella, HeaderDeneb, Preset, Wire,
 };
@@ -22,7 +22,7 @@ fn bootstrap_bytes() -> Vec<u8> {
 fn mainnet_bootstrap_roots() {
     let bytes = bootstrap_bytes();
     let host = Bootstrap::<HeaderDeneb, U512, U6>::from_ssz_bytes(&bytes).unwrap();
-    let cfg = profile::mainnet();
+    let cfg = ChainConfig::mainnet();
     let raw = forks::decode_bootstrap(
         eth_lc_core::ForkName::Fulu,
         Preset::Mainnet,
@@ -46,7 +46,7 @@ fn mainnet_bootstrap_roots() {
         host.header.execution.tree_hash_root().0
     );
     assert_eq!(
-        eth_lc_core::get_lc_execution_root(&core.header),
+        eth_lc_core::get_lc_execution_root(&cfg, &core.header),
         host.header.execution.tree_hash_root().0
     );
 }

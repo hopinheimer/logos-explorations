@@ -6,13 +6,20 @@
 //! bootstrap.ssz         LightClientBootstrap of the named fork layout
 //! update-<period>.ssz   LightClientUpdate (Beacon API `updates`, one per period)
 //! finality-update.ssz   LightClientFinalityUpdate
+//! execution/<hash>.rlp  RLP execution headers (optional), keyed by their Keccak-256
 //! ```
+//!
+//! Gloas-variant headers take their anchor from an RLP execution header.
+//! `load` reads every file in `execution/` and keys it by its own hash, so a
+//! file can only supply the block whose hash it has.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use eth_lc_core::crypto::keccak256;
 use eth_lc_core::{
-    profile, BootstrapInput, ChainConfig, LightClientUpdate, Root, Store, SyncCommittee,
+    BootstrapInput, ChainConfig, LightClientHeader, LightClientUpdate, Root, Store, SyncCommittee,
     UpdateInput,
 };
 use serde::{Deserialize, Serialize};
@@ -44,6 +51,21 @@ pub struct ChainDir {
     pub bootstrap: BootstrapInput,
     pub updates: Vec<LightClientUpdate>,
     pub finality_update: Option<LightClientUpdate>,
+    /// RLP execution headers by block hash, from `execution/`.
+    pub execution_headers: HashMap<Root, Vec<u8>>,
+}
+
+/// The execution block hash a header names: the payload's `block_hash`
+/// (Capella and Deneb variants) or `execution_block_hash` (Gloas variant).
+pub fn execution_block_hash(h: &LightClientHeader) -> Root {
+    match h {
+        LightClientHeader::Capella { execution, .. } => execution.block_hash,
+        LightClientHeader::Deneb { execution, .. } => execution.block_hash,
+        LightClientHeader::Gloas {
+            execution_block_hash,
+            ..
+        } => *execution_block_hash,
+    }
 }
 
 /// Parses a `0x`-prefixed 32-byte hex string.
@@ -54,11 +76,13 @@ pub fn parse_root(s: &str) -> Result<Root> {
         .map_err(|_| anyhow::anyhow!("root {s} is not 32 bytes"))
 }
 
-/// The pinned config of a network name.
+/// The config constructor of a network name.
 pub fn network_config(name: &str) -> Result<ChainConfig> {
     match name {
-        "mainnet" => Ok(profile::mainnet()),
-        other => bail!("no pinned profile for network {other}"),
+        "mainnet" => Ok(ChainConfig::mainnet()),
+        "sepolia" => Ok(ChainConfig::sepolia()),
+        "hoodi" => Ok(ChainConfig::hoodi()),
+        other => bail!("no config constructor for network {other}"),
     }
 }
 
@@ -78,11 +102,19 @@ impl ChainDir {
             ))
         };
         let (fork, bytes) = read(&manifest.bootstrap)?;
+        let mut execution_headers = HashMap::new();
+        if let Ok(entries) = std::fs::read_dir(dir.join("execution")) {
+            for e in entries {
+                let rlp = std::fs::read(e?.path())?;
+                execution_headers.insert(keccak256(&rlp), rlp);
+            }
+        }
         let raw = forks::decode_bootstrap(fork, preset, Wire::Ssz(&bytes))?;
+        let header = forks::to_core_bootstrap(&cfg, &raw)?;
         let bootstrap = BootstrapInput {
             trusted_block_root: parse_root(&manifest.trusted_block_root)?,
-            bootstrap: forks::to_core_bootstrap(&cfg, &raw)?,
-            execution_header_rlp: None,
+            execution_header_rlp: gloas_preimage(&execution_headers, &header.header)?,
+            bootstrap: header,
         };
         let updates = manifest
             .updates
@@ -111,7 +143,32 @@ impl ChainDir {
             bootstrap,
             updates,
             finality_update,
+            execution_headers,
         })
+    }
+}
+
+/// The preimage a header's anchor needs: `None` for Capella and Deneb
+/// variants, the recorded RLP header for a Gloas variant.
+fn gloas_preimage(
+    headers: &HashMap<Root, Vec<u8>>,
+    h: &LightClientHeader,
+) -> Result<Option<Vec<u8>>> {
+    match h {
+        LightClientHeader::Gloas {
+            execution_block_hash,
+            ..
+        } => headers
+            .get(execution_block_hash)
+            .cloned()
+            .map(Some)
+            .with_context(|| {
+                format!(
+                    "no recorded execution header 0x{}",
+                    hex::encode(execution_block_hash)
+                )
+            }),
+        _ => Ok(None),
     }
 }
 
@@ -142,14 +199,22 @@ impl ChainDir {
             .context("no recorded committee matches the selected store root")
     }
 
-    /// The guest input for `update` on top of `store`: the signing committee and its key hints.
+    /// The guest input for `update` on top of `store`: the signing committee,
+    /// its key hints, and the RLP execution header when a Gloas-variant
+    /// finalized header advances the store.
     pub fn update_input(&self, store: &Store, update: &LightClientUpdate) -> Result<UpdateInput> {
         let committee = self.committee_for(store, update)?;
+        let execution_header_rlp = match &update.finality {
+            Some((h, _)) if h.beacon().slot > store.finalized.slot => {
+                gloas_preimage(&self.execution_headers, h)?
+            }
+            _ => None,
+        };
         Ok(UpdateInput {
             hints: key_hints(&committee, &update.sync_aggregate.bits)?,
             committee,
             update: update.clone(),
-            execution_header_rlp: None,
+            execution_header_rlp,
         })
     }
 

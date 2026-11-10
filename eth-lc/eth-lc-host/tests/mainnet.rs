@@ -424,24 +424,51 @@ fn mainnet_update_mutations_fail() {
         f(&mut i);
         assert_eq!(apply_update(&dir.cfg, store, &i), Err(want), "{name}");
     }
-    // Off-profile config, one per pinned field.
-    let alter: Vec<fn(&mut eth_lc_core::ChainConfig)> = vec![
-        |c| c.chain_id = 17_000,
-        |c| c.genesis_validators_root[31] ^= 1,
-        |c| c.genesis_time -= 1,
+    // Preset fields are pinned: each deviation is refused before any check.
+    let preset: Vec<fn(&mut eth_lc_core::ChainConfig)> = vec![
         |c| c.seconds_per_slot = 6,
         |c| c.slots_per_epoch = 16,
         |c| c.epochs_per_sync_committee_period = 128,
         |c| c.sync_committee_size = 256,
-        |c| c.forks[6].version[3] = 1,
-        |c| c.forks[7].epoch = 450_000,
     ];
-    for f in alter {
+    for f in preset {
+        let mut cfg = dir.cfg.clone();
+        f(&mut cfg);
+        assert_eq!(apply_update(&cfg, store, &base), Err(Error::PresetMismatch));
+    }
+    // Chain identity comes from Init: structural violations are refused.
+    let structural: Vec<fn(&mut eth_lc_core::ChainConfig)> = vec![
+        |c| c.chain_id = 0,
+        |c| c.genesis_validators_root = [0; 32],
+        |c| c.forks[6].version = c.forks[5].version,
+        |c| c.forks[6].epoch = c.forks[5].epoch - 1,
+    ];
+    for f in structural {
         let mut cfg = dir.cfg.clone();
         f(&mut cfg);
         assert_eq!(
             apply_update(&cfg, store, &base),
-            Err(Error::ProfileMismatch)
+            Err(Error::InvalidChainIdentity)
         );
     }
+    // Another identity passes the structure. The signing domain binds the
+    // genesis root and the fork version; the operator binds the other
+    // identity fields with `verify_instance_config`.
+    let domain: Vec<fn(&mut eth_lc_core::ChainConfig)> =
+        vec![|c| c.genesis_validators_root[31] ^= 1, |c| {
+            c.forks[6].version[3] = 1
+        }];
+    for f in domain {
+        let mut cfg = dir.cfg.clone();
+        f(&mut cfg);
+        assert_eq!(
+            apply_update(&cfg, store, &base),
+            Err(Error::InvalidSignature)
+        );
+    }
+    let mut other = dir.cfg.clone();
+    other.chain_id = 17_000;
+    other.genesis_time -= 1;
+    other.forks[7].epoch = 600_000;
+    assert!(apply_update(&other, store, &base).is_ok());
 }

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use eth_lc_core::crypto::keccak256;
-use eth_lc_core::profile;
+use eth_lc_core::ChainConfig;
 use eth_lc_host::evidence::{quantity, receipt_proof};
 use eth_lc_host::forks::{self, fork_str, json_to_ssz, Kind, Preset, Wire};
 use eth_lc_host::http::{get_json, rpc};
@@ -88,7 +88,7 @@ fn main() -> Result<()> {
     let rpc_url = flag(&args, "--rpc").unwrap_or_else(|| DEFAULT_RPC.into());
     let scan: u64 = flag(&args, "--scan").map_or(Ok(64), |s| s.parse())?;
     std::fs::create_dir_all(&out)?;
-    let cfg = profile::mainnet();
+    let cfg = ChainConfig::mainnet();
 
     // The anchored block: the finalized execution block of the latest finality update.
     let fin = get_json(&beacon, "/eth/v1/beacon/light_client/finality_update")?;

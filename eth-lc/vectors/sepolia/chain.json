@@ -1,0 +1,31 @@
+{
+  "network": "sepolia",
+  "trusted_block_root": "0x6d3da74374cb6d04b4f59395a2a3293e9294d5d3386145be7ed0d87038cd9b22",
+  "bootstrap": {
+    "fork": "fulu",
+    "file": "bootstrap.ssz"
+  },
+  "updates": [
+    {
+      "fork": "fulu",
+      "file": "update-1376.ssz"
+    },
+    {
+      "fork": "fulu",
+      "file": "update-1377.ssz"
+    },
+    {
+      "fork": "fulu",
+      "file": "update-1378.ssz"
+    },
+    {
+      "fork": "gloas",
+      "file": "update-1379.ssz"
+    },
+    {
+      "fork": "gloas",
+      "file": "update-1380.ssz"
+    }
+  ],
+  "finality_update": null
+}

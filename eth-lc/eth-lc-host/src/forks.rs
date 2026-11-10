@@ -16,6 +16,7 @@ use ssz::{Decode, Encode};
 use ssz_derive::{Decode, Encode};
 use ssz_types::typenum::{Unsigned, U11, U256 as N256, U32, U4, U5, U512, U6, U7, U9};
 use ssz_types::{BitVector, FixedVector, VariableList};
+use tree_hash::TreeHash as _;
 use tree_hash_derive::TreeHash;
 
 pub type PublicKeyBytes = FixedBytes<48>;
@@ -512,11 +513,13 @@ impl AnyHeader {
     }
 }
 
-/// Converts a data-layout header to the core variant of the fork at its own
-/// slot. A Deneb-layout header at a Capella slot becomes a Capella header
-/// (its blob fields must be zero). The empty header becomes the empty header
-/// of the slot's layout. A Gloas-layout header at a pre-Gloas slot fails: the
-/// Gloas layout drops the payload header that the older variants carry.
+/// Converts a data-layout header to a core variant. A Capella or Deneb
+/// layout becomes the variant of the fork at its own slot; a Deneb-layout
+/// header at a Capella slot becomes a Capella header (its blob fields must be
+/// zero). A Gloas-layout header becomes a Gloas header at any slot from
+/// Capella on; before Gloas it carries the payload's `block_hash`
+/// (`specs/gloas/light-client/fork.md`). The empty header becomes the empty
+/// header of the slot's layout.
 pub fn to_core_header(cfg: &ChainConfig, h: &AnyHeader) -> Result<core::LightClientHeader> {
     let slot_fork = cfg.fork_at_slot(h.beacon().slot);
     if h.is_empty() {
@@ -582,7 +585,14 @@ pub fn to_core_header(cfg: &ChainConfig, h: &AnyHeader) -> Result<core::LightCli
                 execution_branch: roots(&h.execution_branch),
             }
         }
-        (AnyHeader::Gloas(h), ForkName::Gloas) => core::LightClientHeader::Gloas {
+        (
+            AnyHeader::Gloas(h),
+            ForkName::Capella
+            | ForkName::Deneb
+            | ForkName::Electra
+            | ForkName::Fulu
+            | ForkName::Gloas,
+        ) => core::LightClientHeader::Gloas {
             beacon: beacon(&h.beacon),
             execution_block_hash: h.execution_block_hash.0,
             execution_branch: roots(&h.execution_branch),
@@ -638,5 +648,151 @@ pub fn to_core_update(cfg: &ChainConfig, u: &RawUpdate) -> Result<core::LightCli
             signature: u.signature,
         },
         signature_slot: u.signature_slot,
+    })
+}
+
+/// Field roots of the 15 Capella fields of an execution payload header.
+macro_rules! capella_field_roots {
+    ($e:expr) => {
+        vec![
+            $e.parent_hash.tree_hash_root().0,
+            $e.fee_recipient.tree_hash_root().0,
+            $e.state_root.tree_hash_root().0,
+            $e.receipts_root.tree_hash_root().0,
+            $e.logs_bloom.tree_hash_root().0,
+            $e.prev_randao.tree_hash_root().0,
+            $e.block_number.tree_hash_root().0,
+            $e.gas_limit.tree_hash_root().0,
+            $e.gas_used.tree_hash_root().0,
+            $e.timestamp.tree_hash_root().0,
+            $e.extra_data.tree_hash_root().0,
+            $e.base_fee_per_gas.tree_hash_root().0,
+            $e.block_hash.tree_hash_root().0,
+            $e.transactions_root.tree_hash_root().0,
+            $e.withdrawals_root.tree_hash_root().0,
+        ]
+    };
+}
+
+/// `compute_merkle_proof` for leaf `index` of a tree with `2**depth` leaves
+/// (`leaves` padded with zero chunks). Bottom node first.
+fn merkle_proof(leaves: &[[u8; 32]], depth: u32, index: usize) -> Vec<[u8; 32]> {
+    let mut layer = leaves.to_vec();
+    layer.resize(1 << depth, [0; 32]);
+    let mut proof = Vec::with_capacity(depth as usize);
+    let mut i = index;
+    for _ in 0..depth {
+        proof.push(layer[i ^ 1]);
+        layer = layer
+            .chunks_exact(2)
+            .map(|p| core::crypto::hash_pair(&p[0], &p[1]))
+            .collect();
+        i /= 2;
+    }
+    proof
+}
+
+/// Prepends zero nodes up to `len` (`normalize_merkle_branch`,
+/// `specs/electra/light-client/sync-protocol.md`).
+fn normalize(branch: &[B256], len: usize) -> Result<Vec<B256>> {
+    let extra = len
+        .checked_sub(branch.len())
+        .ok_or_else(|| anyhow!("branch longer than {len}"))?;
+    Ok(std::iter::repeat_n(B256::ZERO, extra)
+        .chain(branch.iter().copied())
+        .collect())
+}
+
+/// `upgrade_lc_header_to_gloas` (`specs/gloas/light-client/fork.md`): a
+/// header of any supported layout in the Gloas layout. Before Gloas the
+/// execution branch proves the payload's `block_hash` inside `BeaconBlockBody`.
+pub fn upgrade_header_to_gloas(cfg: &ChainConfig, h: &AnyHeader) -> Result<HeaderGloas> {
+    const BLOCK_HASH_INDEX: usize = 12;
+    let (beacon, block_hash, inner, outer) = match h {
+        AnyHeader::Gloas(g) => return Ok(g.clone()),
+        _ if h.is_empty() => {
+            return Ok(HeaderGloas {
+                beacon: BeaconBlockHeader::default(),
+                execution_block_hash: B256::ZERO,
+                execution_branch: FixedVector::default(),
+            })
+        }
+        AnyHeader::Capella(c) => {
+            let e = &c.execution;
+            let leaves: Vec<[u8; 32]> = capella_field_roots!(e);
+            (
+                &c.beacon,
+                e.block_hash,
+                merkle_proof(&leaves, 4, BLOCK_HASH_INDEX),
+                &c.execution_branch,
+            )
+        }
+        AnyHeader::Deneb(d) => {
+            let e = &d.execution;
+            let mut leaves: Vec<[u8; 32]> = capella_field_roots!(e);
+            leaves.push(e.blob_gas_used.tree_hash_root().0);
+            leaves.push(e.excess_blob_gas.tree_hash_root().0);
+            // A Capella-slot header in the Deneb layout upgrades as Capella (`fork.md`).
+            let depth = if cfg.fork_at_slot(d.beacon.slot) == ForkName::Capella {
+                ensure!(
+                    e.blob_gas_used == 0 && e.excess_blob_gas == 0,
+                    "blob fields set before Deneb"
+                );
+                leaves.truncate(15);
+                4
+            } else {
+                5
+            };
+            (
+                &d.beacon,
+                e.block_hash,
+                merkle_proof(&leaves, depth, BLOCK_HASH_INDEX),
+                &d.execution_branch,
+            )
+        }
+    };
+    let branch: Vec<B256> = inner
+        .into_iter()
+        .map(B256::from)
+        .chain(outer.iter().copied())
+        .collect();
+    Ok(HeaderGloas {
+        beacon: beacon.clone(),
+        execution_block_hash: block_hash,
+        execution_branch: FixedVector::new(normalize(&branch, 11)?)
+            .map_err(|e| anyhow!("execution branch: {e:?}"))?,
+    })
+}
+
+fn normalize_roots(branch: &[core::Root], len: usize) -> Result<Vec<core::Root>> {
+    let b: Vec<B256> = branch.iter().copied().map(B256::from).collect();
+    Ok(roots(&normalize(&b, len)?))
+}
+
+/// `upgrade_lc_update_to_gloas` and `upgrade_lc_finality_update_to_gloas`
+/// (`specs/gloas/light-client/fork.md`) on a decoded update.
+pub fn upgrade_update_to_gloas(cfg: &ChainConfig, u: &RawUpdate) -> Result<RawUpdate> {
+    let next = match &u.next {
+        Some((c, branch)) => Some((c.clone(), normalize_roots(branch, 11)?)),
+        None => None,
+    };
+    Ok(RawUpdate {
+        attested_header: AnyHeader::Gloas(upgrade_header_to_gloas(cfg, &u.attested_header)?),
+        next,
+        next_is_empty: u.next_is_empty,
+        finalized_header: AnyHeader::Gloas(upgrade_header_to_gloas(cfg, &u.finalized_header)?),
+        finality_branch: normalize_roots(&u.finality_branch, 9)?,
+        bits: u.bits.clone(),
+        signature: u.signature,
+        signature_slot: u.signature_slot,
+    })
+}
+
+/// `upgrade_lc_bootstrap_to_gloas` (`specs/gloas/light-client/fork.md`) on a decoded bootstrap.
+pub fn upgrade_bootstrap_to_gloas(cfg: &ChainConfig, b: &RawBootstrap) -> Result<RawBootstrap> {
+    Ok(RawBootstrap {
+        header: AnyHeader::Gloas(upgrade_header_to_gloas(cfg, &b.header)?),
+        committee: b.committee.clone(),
+        branch: normalize_roots(&b.branch, 11)?,
     })
 }

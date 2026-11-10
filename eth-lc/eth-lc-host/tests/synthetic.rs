@@ -4,7 +4,7 @@
 
 use blst::min_pk::{AggregatePublicKey, PublicKey};
 use eth_lc_core::config::{compute_domain, compute_signing_root, DOMAIN_SYNC_COMMITTEE};
-use eth_lc_core::profile::{minimal, FORK_COUNT};
+use eth_lc_core::profile::FORK_COUNT;
 use eth_lc_core::{
     apply_update, initialize_store, validate_light_client_update, ChainConfig, Error, ForkName,
     LightClientHeader, Store, UpdateInput,
@@ -17,7 +17,7 @@ const GVR: [u8; 32] = [0x42; 32];
 fn cfg_for(fork: ForkName) -> ChainConfig {
     let epochs: [u64; FORK_COUNT] =
         std::array::from_fn(|i| if i <= fork as usize { 0 } else { u64::MAX });
-    minimal(GVR, epochs)
+    ChainConfig::minimal(GVR, epochs)
 }
 
 const SUPPORTED: [ForkName; 5] = [
@@ -176,7 +176,7 @@ fn force_update_shapes_are_refused() {
 fn domain_uses_the_slot_before_the_signature() {
     // Electra at genesis, Fulu at epoch 2 (slot 16).
     let epochs = [0, 0, 0, 0, 0, 0, 2, u64::MAX];
-    let cfg = minimal(GVR, epochs);
+    let cfg = ChainConfig::minimal(GVR, epochs);
     let c = TestCommittee::new(1, 32);
     let s0 = initialize_store(&cfg, &make_bootstrap(&cfg, 8, &c.committee)).unwrap();
     // Signature slot 16 is the first Fulu slot; the domain comes from slot 15 (Electra).
@@ -398,12 +398,12 @@ fn mutations_fail() {
         let mut variant = base.clone();
         variant.update.attested_header = alien;
         cases.push(("header variant", variant, s0.clone(), Error::HeaderVariant));
-        // Off-profile config.
+        // Off-preset config.
         let mut off = s.cfg.clone();
-        off.genesis_time += 1;
+        off.seconds_per_slot += 1;
         assert_eq!(
             apply_update(&off, &s0, &base),
-            Err(Error::ProfileMismatch),
+            Err(Error::PresetMismatch),
             "{fork:?}"
         );
         if fork == ForkName::Gloas {
@@ -460,7 +460,13 @@ fn bootstrap_mutations_fail() {
             Err(Error::InvalidCurrentCommitteeBranch)
         );
         let mut off = cfg.clone();
-        off.chain_id = 1;
-        assert_eq!(initialize_store(&off, &good), Err(Error::ProfileMismatch));
+        off.slots_per_epoch = 32;
+        assert_eq!(initialize_store(&off, &good), Err(Error::PresetMismatch));
+        let mut zero = cfg.clone();
+        zero.chain_id = 0;
+        assert_eq!(
+            initialize_store(&zero, &good),
+            Err(Error::InvalidChainIdentity)
+        );
     }
 }
