@@ -13,3 +13,4 @@ eth-lc-core = { path = "../../../eth-lc/eth-lc-core" }
 eth-lc-host = { path = "../../../eth-lc/eth-lc-host" }
 borsh = "1.5"
 anyhow = "1"
+serde_json = "1"

@@ -19,10 +19,10 @@ index 7207ea0..3c7f751 100644
          Program::new_unchecked(
 diff --git a/lee/state_machine/src/state/tests/lc_spike.rs b/lee/state_machine/src/state/tests/lc_spike.rs
 new file mode 100644
-index 0000000..d2f8e0d
+index 0000000..96d0b8a
 --- /dev/null
 +++ b/lee/state_machine/src/state/tests/lc_spike.rs
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,482 @@
 +//! E1a: can a light-client update run in LEZ's proven (private) mode and
 +//! advance a public instance, and what does the sequencer meter for it?
 +
@@ -373,6 +373,137 @@ index 0000000..d2f8e0d
 +        state.get_account_by_id(INSTANCE).data.actor_state(program_id).as_ref(),
 +        store_bytes.as_slice()
 +    );
++}
++
++// ---------------------------------------------------------------------------
++// E1b wire and window, dev mode. Needs E1B_ELF (packed guest), E1B_INPUT
++// (step input), E1B_STORE (instance state before it) and E1B_STALE_MS (the
++// store's `stale_after_ms`). E1B_UPDATE_TAG is the borsh index of `Update` in
++// the guest's message enum (default 0). With E1B_ATTEST_TAG, E1B_ATTEST_STATE
++// and E1B_ATTEST_CLAIM, the guest's `Attest` also runs on that state.
++
++fn env_path(name: &str) -> Vec<u8> {
++    std::fs::read(std::env::var(name).unwrap()).unwrap()
++}
++
++/// `[tag] || borsh(fields)`: one message of the guest's enum.
++fn tagged(tag: u8, fields: &impl BorshSerialize) -> Vec<u8> {
++    let mut out = vec![tag];
++    out.extend(borsh::to_vec(fields).unwrap());
++    out
++}
++
++#[test]
++#[ignore = "needs E1B_ELF, E1B_INPUT, E1B_STORE and E1B_STALE_MS"]
++fn e1b_wire_and_window() {
++    let elf = env_path("E1B_ELF");
++    let input = env_path("E1B_INPUT");
++    let store_bytes = env_path("E1B_STORE");
++    let stale_ms: u64 = std::env::var("E1B_STALE_MS").unwrap().parse().unwrap();
++    let update_tag: u8 = std::env::var("E1B_UPDATE_TAG").map_or(0, |t| t.parse().unwrap());
++    let image_id: ProgramId = risc0_zkvm::compute_image_id(&elf).unwrap().into();
++    let program = Program::new_unchecked(image_id, std::borrow::Cow::Owned(elf));
++    let program_id = AccountId::from_builtin_program(program.id());
++    let instance = Actor::new(INSTANCE, program_id);
++    let keys = test_private_account_keys_1();
++    let account_id = AccountId::for_regular_private_account(&keys.npk(), &keys.vpk());
++    let pre_account = Account::funded(100);
++    let mut state = V03State::new()
++        .with_programs([program.clone()])
++        .with_private_account(&keys, &pre_account);
++    state.force_insert_account(
++        INSTANCE,
++        Account::default().with_actor_state(program_id, store_bytes.clone().into()),
++    );
++    let direct = |message: Vec<u8>| {
++        let probe = ReceiveInput {
++            receiver: Actor::new(AccountId::new([7; 32]), program_id),
++            from: None,
++            is_authorized: true,
++            pre_state: ActorState::empty(),
++            message,
++        };
++        program.handle_message(&probe, u64::MAX).map(|(t, _)| t)
++    };
++    let prove = |message: Vec<u8>| {
++        let membership_proof = state
++            .get_proof_for_commitment(&Commitment::new(&account_id, &pre_account))
++            .unwrap();
++        let proving = ProvingInput {
++            public_context: Ctx::new(vec![instance], []),
++            private_witnesses: vec![update_witness(&keys, pre_account.clone(), membership_proof)],
++            ..proving_input(root(Actor::new(account_id, program_id), &RawMessage(message)))
++        };
++        execute_and_prove_with_cross_messages(
++            proving,
++            vec![Vec::new()],
++            &ProgramCatalog::from([(program_id, program.clone())]),
++            |_| SenderPresentation::Blinded([9; 32]),
++            |_, _| false,
++            no_seal,
++        )
++        .map(|proven| private_tx(proven, vec![], &[]))
++    };
++    let update = |input: &[u8]| tagged(update_tag, &(instance, input.to_vec()));
++
++    // The guest's window ends at the store's `stale_after_ms`, exclusive.
++    let t = direct(update(&input)).expect("step input inside the wire");
++    assert_eq!(t.response.validity.timestamps.start(), None);
++    assert_eq!(t.response.validity.timestamps.end(), Some(stale_ms));
++
++    // One trailing byte after `UpdateInput`: the guest refuses.
++    let mut trailing = input.clone();
++    trailing.push(0);
++    assert!(direct(update(&trailing)).is_err(), "trailing byte accepted");
++    assert!(prove(update(&trailing)).is_err(), "trailing byte proven");
++
++    // The proven update settles inside the window and is refused at `stale_after_ms`.
++    let tx = prove(update(&input)).expect("the update proves");
++    let mut at_stale = state.clone();
++    assert!(at_stale.transition_from_privacy_preserving_transaction(&tx, 1, stale_ms).is_err());
++    assert_eq!(
++        at_stale.get_account_by_id(INSTANCE).data.actor_state(program_id).as_ref(),
++        store_bytes.as_slice()
++    );
++    let mut inside = state.clone();
++    inside
++        .transition_from_privacy_preserving_transaction(&tx, 1, stale_ms - 1)
++        .expect("settles one millisecond before the bound");
++    assert_ne!(
++        inside.get_account_by_id(INSTANCE).data.actor_state(program_id).as_ref(),
++        store_bytes.as_slice()
++    );
++    println!("E1B window: accepted at stale_after_ms-1, refused at stale_after_ms={stale_ms}; trailing byte refused");
++
++    // `Attest` leaves the window open: valid at any time, also on a stale store.
++    if let Ok(tag) = std::env::var("E1B_ATTEST_TAG") {
++        let attest_state = env_path("E1B_ATTEST_STATE");
++        let claim = env_path("E1B_ATTEST_CLAIM");
++        let mut message = vec![tag.parse::<u8>().unwrap()];
++        message.extend(claim);
++        let input = ReceiveInput {
++            receiver: instance,
++            from: None,
++            is_authorized: false,
++            pre_state: attest_state.into(),
++            message,
++        };
++        let (t, _) = program.handle_message(&input, u64::MAX).expect("the claim holds");
++        assert_eq!(t.response.validity.timestamps.start(), None);
++        assert_eq!(t.response.validity.timestamps.end(), None);
++        assert!(t.response.validity.timestamps.is_valid_for(u64::MAX));
++        assert_eq!(t.response.events.len(), 1);
++        println!("E1B attest: open window, one attestation event");
++    }
++}
++
++/// A message given as its encoded bytes.
++struct RawMessage(Vec<u8>);
++
++impl BorshSerialize for RawMessage {
++    fn serialize<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
++        w.write_all(&self.0)
++    }
 +}
 diff --git a/lee/state_machine/src/state/tests/mod.rs b/lee/state_machine/src/state/tests/mod.rs
 index 4e97ef2..fc5ec52 100644

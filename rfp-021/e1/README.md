@@ -28,6 +28,7 @@ sequenceDiagram
 
 LEZ `v0.4.0-rc1` (`1806e873`). RISC Zero 3.0.5 guests, `r0vm` 3.0.6. Apple M3 Max, 16 cores, 64 GB.
 E1b runs `eth-lc-core` (`../../eth-lc`), written from consensus-specs `v1.7.0-beta.4`, on recorded mainnet periods 1902 to 1905.
+The program pins the mainnet preset and takes the chain identity from `Init`, so the same image serves mainnet, Sepolia and Hoodi. The operator verifies the identity with `eth_lc_host::checkpoint::verify_instance_config`.
 
 | Run | What | Result |
 |---|---|---|
@@ -37,7 +38,8 @@ E1b runs `eth-lc-core` (`../../eth-lc`), written from consensus-specs `v1.7.0-be
 | E1a, dev | blinded sender | still recognised as its program; settles |
 | E1a, dev | same transaction replayed | refused by LEZ (commitment already seen) |
 | E1a, **real proof** | toy update, 12.6M cycles | settles with a verified receipt; **895 s** CPU, **13.0 GB** peak, proof **224,813 B** |
-| E1b, dev | **real mainnet update** with committee handoff (period 1902 to 1903, step 1) | settles; private **14,039,076** cycles, public part **20,032** cycles; input 52,204 B stays off chain |
+| E1b, dev | **real mainnet update** with committee handoff (period 1902 to 1903, step 1) | settles; private **14,039,371** cycles, public part **20,032** cycles; input 52,204 B stays off chain |
+| E1b, dev | guest wire and `Update` window, step 1 (`just e1b-window`) | settles at `stale_after_ms - 1`; refused at `stale_after_ms`; one trailing input byte refused. The README guest example (`just consumer-check` in `eth-lc`) passes the same cases, and its `Attest` leaves the timestamp window open |
 | E1b, **real proof** | the same real update | settles with a verified receipt; **1,079 s** CPU, **12.2 GB** peak, transaction **228,299 B** |
 | E1b, dev | the same real update **executed directly** (what a sequencer would run on the public path) | **260 ms** mean of 5. For scale: LEZ's fee model prices verifying a private-transaction receipt at about 12 ms (`PRIVATE_VERIFY_GAS`, M2 Pro calibration) |
 | E1c, dev | toy update through the block fee path (`settle_transaction`) | exec gas **419,311** = 409,764 flat + 9,547; storage gas **224,063**; **4.19%** of a block's exec, **22.4%** of its storage; base fee 5,146,992 at the floor price |

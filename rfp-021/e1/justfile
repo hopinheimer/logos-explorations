@@ -74,6 +74,25 @@ e1b step="1": lez e1b-inputs e1b-elf
       RISC0_DEV_MODE=1 {{lee_test}} e1b_real_update -- --ignored --nocapture 2>&1 \
       | grep -E '^E1B|^test |test result|panicked' | tee {{results}}/e1b-dev-step{{step}}.log
 
+# E1b, dev mode: the guest wire and the `Update` window on step 1, under the LEZ executor
+e1b-window: e1b-elf
+    just window-test "{{e1b}}/e1b_lc.bin" 0
+
+# Wire and window test of a packed guest `elf` on step 1. `update_tag` and `attest_tag` are the
+# borsh indices of `Update` and `Attest` in its message enum; `Attest` runs only when `attest_tag` is set.
+window-test elf update_tag="0" attest_tag="": lez e1b-inputs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{results}}"
+    attest=()
+    if [ -n "{{attest_tag}}" ]; then
+        attest=(E1B_ATTEST_TAG={{attest_tag}} E1B_ATTEST_STATE="{{e1b}}/attest-state.bin" E1B_ATTEST_CLAIM="{{e1b}}/attest-claim.bin")
+    fi
+    cd "{{lez}}" && env E1B_ELF="{{elf}}" E1B_INPUT="{{e1b}}/step-1.bin" E1B_STORE="{{e1b}}/store-1.bin" \
+      E1B_STALE_MS="$(cat "{{e1b}}/stale-1.txt")" E1B_UPDATE_TAG={{update_tag}} ${attest[@]+"${attest[@]}"} \
+      RISC0_DEV_MODE=1 {{lee_test}} e1b_wire_and_window -- --ignored --nocapture 2>&1 \
+      | grep -E '^E1B|^test |test result|panicked'
+
 # E1b, real proof of real mainnet update `step` (CPU, via r0vm)
 e1b-prove step="1": lez e1b-inputs e1b-elf
     mkdir -p {{results}}
@@ -95,7 +114,7 @@ e1c-prove burn="1000": lez
       | grep -E '^E1C|^test |test result|panicked' | tee {{results}}/e1c-prove.log
 
 # All dev-mode runs (minutes)
-all: e1a e1b e1c
+all: e1a e1b e1b-window e1c
 
 # Remove .work/
 clean:
