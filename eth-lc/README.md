@@ -149,6 +149,30 @@ Migrate:
 4. Point consumers at the new instance id. Keep the old id for claims against
    headers the old instance recorded.
 
+## Participants: safety and liveness
+
+A LEZ program built on these crates needs the off-chain participants below.
+"Safety" means the participant can make an instance accept a false header or
+claim. "Liveness" means the participant can only delay progress.
+
+| Participant | Role | Affects | Why |
+|---|---|---|---|
+| Ethereum sync committee | Signs the headers that updates carry | Safety | The trust assumption of the protocol: at least 1/3 of each 512-member committee is honest. The core requires 2/3 participation. |
+| Instance deployer | Sends `Init` with the chain config and the checkpoint | Safety, for that instance only | The trust anchor. Anyone can repeat `verify_instance_config` and `verify_new_checkpoint` on the stored config and checkpoint. A consumer chooses which instance to read. |
+| Beacon API endpoint | Serves bootstraps, updates and the chain spec | Liveness | The core checks every update by Merkle branches and the committee signature. Any beacon node serves this data, so a user can run one. |
+| Execution RPC endpoint | Serves block headers, receipts and MPT proofs | Liveness | The core checks each item by Keccak-256 against an anchored root. Any execution node serves this data. |
+| Prover | Proves the update or claim transaction | Liveness | The inputs are public chain data. Anyone with the program image can prove, on local hardware or on a prover network. |
+| Submitter | Sends the proven transaction to LEZ | Liveness | Any account can submit, with no relationship to the instance. |
+| Claimant | Submits evidence for an attestation | Liveness, for that claim only | The claimant is the party that wants the attestation. It holds every input it needs. |
+| LEZ sequencer | Orders transactions and supplies the clock | Liveness | The program reads the clock only for the stale window. A late or wrong clock can stall updates. It cannot make the core accept a header. |
+
+Each liveness role is permissionless, and its inputs are public. So a user
+can fill every role alone, with an Ethereum node, a LEZ account and a prover.
+A class of participants can therefore delay a user, and the user can still
+produce the attestation. If updates stop for a full period, the instance
+stalls. Claims against recorded headers keep working, and a new instance
+restores updates (see Stalls and migration).
+
 `verify_new_checkpoint` accepts a root only when `verify_instance_config`
 accepts the config; every answering endpoint reports the root as canonical
 and finalized and serves the same bootstrap; for a Gloas-variant bootstrap
