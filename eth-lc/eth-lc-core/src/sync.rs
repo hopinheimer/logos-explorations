@@ -6,14 +6,16 @@ use crate::bls::{participation, verify_sync_aggregate};
 use crate::config::{compute_domain, compute_signing_root, ChainConfig, DOMAIN_SYNC_COMMITTEE};
 use crate::execution::execution_anchor;
 use crate::fork::{
-    current_sync_committee_gindex, execution_gindex, finalized_root_gindex,
-    next_sync_committee_gindex, ForkName,
+    current_sync_committee_gindex, execution_block_hash_gindex, finalized_root_gindex,
+    next_sync_committee_gindex, ForkName, EXECUTION_PAYLOAD_GINDEX,
 };
 use crate::profile::check_profile;
-use crate::ssz::is_valid_normalized_merkle_branch;
+use crate::ssz::{
+    compute_merkle_branch_root, floorlog2, get_subtree_index, is_valid_normalized_merkle_branch,
+};
 use crate::types::{
-    BootstrapInput, KeyHints, LightClientHeader, LightClientUpdate, Root, Store, SyncCommittee,
-    UpdateInput,
+    BootstrapInput, ExecutionPayloadHeaderCapella, ExecutionPayloadHeaderDeneb, KeyHints,
+    LightClientHeader, LightClientUpdate, Root, Store, SyncCommittee, UpdateInput,
 };
 use crate::Error;
 
@@ -23,29 +25,37 @@ pub const GENESIS_SLOT: u64 = 0;
 pub const MIN_SYNC_COMMITTEE_PARTICIPANTS: u32 = 1;
 
 /// `is_valid_light_client_header` (`specs/gloas/light-client/sync-protocol.md`
-/// and earlier), with the variant bound to the fork at the header's slot.
+/// and earlier). The fork at the header's own slot picks the gindex. Capella
+/// and Deneb variants must match that fork. A Gloas variant is valid at any
+/// slot from Capella on: before Gloas it proves the payload's `block_hash`
+/// (the Gloas upgrade of an older header, `specs/gloas/light-client/fork.md`).
 fn check_header(cfg: &ChainConfig, header: &LightClientHeader) -> Result<(), Error> {
     let beacon = header.beacon();
     let fork = cfg.fork_at_slot(beacon.slot);
-    let gindex = execution_gindex(fork).ok_or(Error::UnsupportedFork)?;
-    let leaf = match (fork, header) {
+    let (leaf, gindex) = match (fork, header) {
+        (ForkName::Phase0 | ForkName::Altair | ForkName::Bellatrix, _) => {
+            return Err(Error::UnsupportedFork)
+        }
         (ForkName::Capella, LightClientHeader::Capella { execution, .. }) => {
-            execution.hash_tree_root()
+            (execution.hash_tree_root(), EXECUTION_PAYLOAD_GINDEX)
         }
         (
             ForkName::Deneb | ForkName::Electra | ForkName::Fulu,
             LightClientHeader::Deneb { execution, .. },
-        ) => execution.hash_tree_root(),
+        ) => (execution.hash_tree_root(), EXECUTION_PAYLOAD_GINDEX),
         (
-            ForkName::Gloas,
+            _,
             LightClientHeader::Gloas {
                 execution_block_hash,
                 ..
             },
-        ) => Some(*execution_block_hash),
+        ) => (
+            Some(*execution_block_hash),
+            execution_block_hash_gindex(fork).ok_or(Error::UnsupportedFork)?,
+        ),
         _ => return Err(Error::HeaderVariant),
-    }
-    .ok_or(Error::InvalidHeader)?;
+    };
+    let leaf = leaf.ok_or(Error::InvalidHeader)?;
     if is_valid_normalized_merkle_branch(
         &leaf,
         header.execution_branch(),
@@ -67,15 +77,49 @@ pub fn is_valid_light_client_header(cfg: &ChainConfig, header: &LightClientHeade
 
 /// `get_lc_execution_root` (`specs/gloas/light-client/sync-protocol.md`,
 /// `specs/deneb/light-client/sync-protocol.md`): the payload-header root
-/// (Capella and Deneb layouts) or `execution_block_hash` (Gloas).
-pub fn get_lc_execution_root(header: &LightClientHeader) -> Root {
+/// (Capella and Deneb variants), `execution_block_hash` (Gloas variant at a
+/// Gloas slot), or the payload-header root that a Gloas variant at an older
+/// slot proves through its branch. Before Capella, and for a branch too short
+/// for its gindex, the zero root.
+pub fn get_lc_execution_root(cfg: &ChainConfig, header: &LightClientHeader) -> Root {
+    let fork = cfg.fork_at_slot(header.beacon().slot);
     match header {
         LightClientHeader::Capella { execution, .. } => execution.hash_tree_root(),
         LightClientHeader::Deneb { execution, .. } => execution.hash_tree_root(),
         LightClientHeader::Gloas {
             execution_block_hash,
-            ..
-        } => Some(*execution_block_hash),
+            execution_branch,
+            beacon,
+        } => match fork {
+            ForkName::Gloas => Some(*execution_block_hash),
+            ForkName::Capella | ForkName::Deneb | ForkName::Electra | ForkName::Fulu => {
+                let deneb = fork != ForkName::Capella;
+                if beacon.slot == GENESIS_SLOT {
+                    if deneb {
+                        ExecutionPayloadHeaderDeneb::default().hash_tree_root()
+                    } else {
+                        ExecutionPayloadHeaderCapella::default().hash_tree_root()
+                    }
+                } else {
+                    // `block_hash` gindex inside the payload header: 15 fields
+                    // pad to 16 leaves (Capella), 17 pad to 32 (Deneb).
+                    let block_hash_gindex: u64 = if deneb { 32 + 12 } else { 16 + 12 };
+                    let depth = floorlog2(block_hash_gindex);
+                    let inner_len = execution_branch
+                        .len()
+                        .saturating_sub(floorlog2(EXECUTION_PAYLOAD_GINDEX) as usize);
+                    inner_len.checked_sub(depth as usize).and_then(|start| {
+                        compute_merkle_branch_root(
+                            execution_block_hash,
+                            &execution_branch[start..inner_len],
+                            depth,
+                            get_subtree_index(block_hash_gindex),
+                        )
+                    })
+                }
+            }
+            _ => None,
+        },
     }
     .unwrap_or_default()
 }
@@ -346,7 +390,10 @@ pub fn stale_after_ms(cfg: &ChainConfig, store: &Store) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::mainnet;
+    use crate::config::ChainConfig;
+    fn mainnet() -> ChainConfig {
+        ChainConfig::mainnet()
+    }
 
     #[test]
     fn stale_after_at_period_boundaries() {

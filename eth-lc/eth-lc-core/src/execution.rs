@@ -2,9 +2,10 @@
 //!
 //! Capella through Fulu: the payload header in the beacon block, verified by
 //! the header's execution branch (`specs/capella/light-client/sync-protocol.md`).
-//! Gloas: the block named by `execution_block_hash`, the bid's parent block
-//! (`specs/gloas/light-client/sync-protocol.md`), from its RLP header
-//! (Yellow Paper 4.3, App. B) checked by Keccak-256.
+//! Gloas variant: the block named by `execution_block_hash`, from its RLP
+//! header (Yellow Paper 4.3, App. B) checked by Keccak-256. At a Gloas slot
+//! that block is the bid's parent block; at an older slot it is the header's
+//! own payload block (`specs/gloas/light-client/sync-protocol.md`, `fork.md`).
 
 use alloy_rlp::{Decodable, Header};
 
@@ -17,7 +18,8 @@ use crate::Error;
 pub const MIN_HEADER_FIELDS: usize = 15;
 
 /// The anchor of a header that already passed `is_valid_light_client_header`.
-/// Gloas headers need `execution_header_rlp`; earlier headers take none.
+/// Gloas-variant headers need `execution_header_rlp`, at any slot; Capella and
+/// Deneb variants take none.
 pub fn execution_anchor(
     header: &LightClientHeader,
     execution_header_rlp: Option<&[u8]>,

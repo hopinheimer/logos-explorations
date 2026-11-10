@@ -111,9 +111,10 @@ impl Default for ExecutionPayloadHeaderDeneb {
     }
 }
 
-/// `LightClientHeader` per fork layout. The variant must match the fork at
-/// the header's own slot: `Capella`; `Deneb` for Deneb, Electra and Fulu;
-/// `Gloas` (`specs/{capella,deneb,gloas}/light-client/sync-protocol.md`).
+/// `LightClientHeader` per fork layout (`specs/{capella,deneb,gloas}/light-client/sync-protocol.md`).
+/// `Capella` holds at a Capella slot, `Deneb` at a Deneb, Electra or Fulu
+/// slot. `Gloas` holds at any slot from Capella on: at an older slot it is
+/// the Gloas upgrade of that slot's header (`specs/gloas/light-client/fork.md`).
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
 pub enum LightClientHeader {
     Capella {

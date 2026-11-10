@@ -77,9 +77,16 @@ pub const EXECUTION_PAYLOAD_GINDEX: u64 = 25;
 /// `EXECUTION_BLOCK_HASH_GINDEX_GLOAS` (`specs/gloas/light-client/sync-protocol.md`).
 pub const EXECUTION_BLOCK_HASH_GINDEX_GLOAS: u64 = 2856;
 
-/// Gindex of the execution leaf in `BeaconBlockBody` for headers of `fork`:
-/// the payload header (Capella through Fulu) or the bid's parent block hash
-/// (Gloas). `None` before Capella.
+/// `EXECUTION_BLOCK_HASH_GINDEX` (`specs/gloas/light-client/sync-protocol.md`):
+/// `block_hash` in the Capella payload of `BeaconBlockBody`.
+pub const EXECUTION_BLOCK_HASH_GINDEX: u64 = 412;
+/// `EXECUTION_BLOCK_HASH_GINDEX_DENEB` (`specs/gloas/light-client/sync-protocol.md`):
+/// `block_hash` in the Deneb payload of `BeaconBlockBody` (also Electra and Fulu).
+pub const EXECUTION_BLOCK_HASH_GINDEX_DENEB: u64 = 812;
+
+/// Gindex of the execution leaf in `BeaconBlockBody` for headers of `fork`
+/// in the layout of that fork: the payload header (Capella through Fulu) or
+/// the bid's parent block hash (Gloas). `None` before Capella.
 pub fn execution_gindex(fork: ForkName) -> Option<u64> {
     match fork {
         ForkName::Phase0 | ForkName::Altair | ForkName::Bellatrix => None,
@@ -88,10 +95,28 @@ pub fn execution_gindex(fork: ForkName) -> Option<u64> {
     }
 }
 
+/// Gindex of `execution_block_hash` in `BeaconBlockBody` for a Gloas-layout
+/// header at a slot of `fork` (`is_valid_light_client_header`,
+/// `specs/gloas/light-client/sync-protocol.md`): the payload's `block_hash`
+/// before Gloas, the bid's parent block hash at Gloas. `None` before Capella.
+pub fn execution_block_hash_gindex(fork: ForkName) -> Option<u64> {
+    match fork {
+        ForkName::Phase0 | ForkName::Altair | ForkName::Bellatrix => None,
+        ForkName::Capella => Some(EXECUTION_BLOCK_HASH_GINDEX),
+        ForkName::Deneb | ForkName::Electra | ForkName::Fulu => {
+            Some(EXECUTION_BLOCK_HASH_GINDEX_DENEB)
+        }
+        ForkName::Gloas => Some(EXECUTION_BLOCK_HASH_GINDEX_GLOAS),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::mainnet;
+    use crate::config::ChainConfig;
+    fn mainnet() -> ChainConfig {
+        ChainConfig::mainnet()
+    }
 
     #[test]
     fn gindex_tables() {
@@ -109,6 +134,32 @@ mod tests {
             assert_eq!(current_sync_committee_gindex(f), cur, "{f:?}");
             assert_eq!(next_sync_committee_gindex(f), next, "{f:?}");
             assert_eq!(execution_gindex(f), exe, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn block_hash_gindices() {
+        // `block_hash` is field 12 of the payload header: 15 fields pad to 16
+        // leaves (Capella), 17 fields pad to 32 (Deneb).
+        assert_eq!(
+            EXECUTION_BLOCK_HASH_GINDEX,
+            EXECUTION_PAYLOAD_GINDEX * 16 + 12
+        );
+        assert_eq!(
+            EXECUTION_BLOCK_HASH_GINDEX_DENEB,
+            EXECUTION_PAYLOAD_GINDEX * 32 + 12
+        );
+        use ForkName::*;
+        let expect = [
+            (Bellatrix, None),
+            (Capella, Some(412)),
+            (Deneb, Some(812)),
+            (Electra, Some(812)),
+            (Fulu, Some(812)),
+            (Gloas, Some(2856)),
+        ];
+        for (f, g) in expect {
+            assert_eq!(execution_block_hash_gindex(f), g, "{f:?}");
         }
     }
 

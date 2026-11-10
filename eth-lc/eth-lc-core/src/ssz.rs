@@ -157,17 +157,17 @@ pub fn get_subtree_index(gindex: u64) -> u64 {
     gindex % (1u64 << floorlog2(gindex))
 }
 
-/// `is_valid_merkle_branch` (`specs/phase0/beacon-chain.md`). Reads the
-/// first `depth` nodes of `branch`; fails when `branch` is shorter.
-pub fn is_valid_merkle_branch(
+/// `compute_merkle_branch_root` (`specs/gloas/light-client/sync-protocol.md`
+/// uses it in `get_lc_execution_root`): the root from `leaf` and the first
+/// `depth` nodes of `branch`. `None` when `branch` is shorter than `depth`.
+pub fn compute_merkle_branch_root(
     leaf: &Root,
     branch: &[Root],
     depth: u32,
     index: u64,
-    root: &Root,
-) -> bool {
+) -> Option<Root> {
     if branch.len() < depth as usize {
-        return false;
+        return None;
     }
     let mut value = *leaf;
     for (i, node) in branch.iter().take(depth as usize).enumerate() {
@@ -177,7 +177,19 @@ pub fn is_valid_merkle_branch(
             hash_pair(&value, node)
         };
     }
-    value == *root
+    Some(value)
+}
+
+/// `is_valid_merkle_branch` (`specs/phase0/beacon-chain.md`). Reads the
+/// first `depth` nodes of `branch`; fails when `branch` is shorter.
+pub fn is_valid_merkle_branch(
+    leaf: &Root,
+    branch: &[Root],
+    depth: u32,
+    index: u64,
+    root: &Root,
+) -> bool {
+    compute_merkle_branch_root(leaf, branch, depth, index) == Some(*root)
 }
 
 /// `is_valid_normalized_merkle_branch` (`specs/altair/light-client/sync-protocol.md`).
