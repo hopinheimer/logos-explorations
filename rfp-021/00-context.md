@@ -33,7 +33,7 @@ Sources are cloned in the session scratchpad (`src/rfp`, `src/lez`, `src/cs`).
 - SPEL (latest `v0.7.0-rc.3`) supports neither LEZ v0.3 nor v0.4 (spel#291 open). Every serious proposal ships a SPEL-format IDL by hand with a drift check.
 
 ### Ethereum facts
-- Gloas (ePBS, EIP-7732) is live on Sepolia (2026-10-06) and Hoodi (2026-10-26). Mainnet has no date.
+- Gloas (ePBS, EIP-7732) is live on Sepolia from epoch 353,024 (2026-10-06, the first slot of sync period 1379; Beacon API `/eth/v1/config/spec`). Hoodi has `GLOAS_FORK_EPOCH` unscheduled (`2^64-1`). Mainnet has no date.
 - Gloas `LightClientHeader` drops `execution` and carries `execution_block_hash`, proven at gindex 2856 = `signed_execution_payload_bid.message.parent_block_hash`. State gindices move (EIP-7688): finalized root 735, current committee 2945, next committee 2946.
 - A light-client store needs at least one update per sync-committee period (27.3 h) to follow handoffs.
 - The "Logos Ethereum core module" is `logos-co/logos-verified-proxy-module` (Nimbus `libverifproxy`). It does not expose light-client objects or raw `eth_getProof` nodes. Its C ABI accepts host-supplied beacon and execution transports, which is the upstream extension point (Proposal #224's analysis).
@@ -79,7 +79,7 @@ Do not publish anything from this list that reads as a vulnerability in their co
 - No prototype, no numbers, no Gloas, no LEZ code. Generic requirement restatement. Founder background is commodity quant work. $48k. Did not consent to public use. Weak.
 
 ### #239 le-sync (Nani Plus, 1.25 FTE)
-- Pipeline names copy Proposal #224 (`begin_update`, `miller_update`, `finish_update`). Repo `cenwadike/LE-sync` was created recently (pushed 2026-10-30). No measurements. Electra and Fulu only (testnets run Gloas). Plans to store whole 512-key committees on chain. Replaces the audit with a $10k bug bounty. Says ownership passes to the Logos core team (the T&C say Logos maintains nothing). $60k. Weak.
+- Pipeline names copy Proposal #224 (`begin_update`, `miller_update`, `finish_update`). Repo `cenwadike/LE-sync` was created recently (pushed 2026-10-30). No measurements. Electra and Fulu only (Sepolia runs Gloas). Plans to store whole 512-key committees on chain. Replaces the audit with a $10k bug bounty. Says ownership passes to the Logos core team (the T&C say Logos maintains nothing). $60k. Weak.
 
 ## 4. What a winning proposal needs
 
@@ -87,7 +87,7 @@ Must-haves (table stakes, Proposal #224 already has most):
 - Prototype evidence with reproducible numbers, on real chain data.
 - Full FURPS and VS traceability, every item mapped to a test or artifact.
 - An honest answer to the central feasibility question (BLS in-program).
-- Gloas-aware light client (testnets already run it).
+- Gloas-aware light client (Sepolia already runs it).
 - Reuse assessment of r0vm-helios, SP1 Helios, Helios (R.6), with audit-surface consequences.
 - Audit plan with named firms and a budget line.
 - Operator commitment for a period (expect a servicing ask like RFP-020 PR #107).
