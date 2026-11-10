@@ -378,10 +378,16 @@ pub fn apply_update(cfg: &ChainConfig, store: &Store, input: &UpdateInput) -> Re
     Ok(next)
 }
 
-/// Liveness bound: the start (Unix ms) of the period two after the store's
-/// finalized period. At that time the last period with honest updates for
-/// this store has ended and the instance is stalled. Safety is independent of
-/// this bound.
+/// End of the update window: the start (Unix ms) of the period two after the
+/// store's finalized period P. Honest updates signed in P+1 stay valid and
+/// fetchable after this time; the guest refuses them anyway, and the instance
+/// is stalled.
+///
+/// The bound is the expiry of committee keys. `signature_slot` is outside the
+/// signed message, so a committee can sign an update for this store for as
+/// long as the window is open. P's committee stays usable through P+1, one
+/// period after its duty ends. The expiry holds only while the sequencer
+/// clock moves forward.
 pub fn stale_after_ms(cfg: &ChainConfig, store: &Store) -> u64 {
     let period = cfg.period_at_slot(store.finalized.slot);
     cfg.slot_start_ms(cfg.period_start_slot(period.saturating_add(2)))

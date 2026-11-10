@@ -50,7 +50,7 @@ const FORK_KEYS: [&str; 8] = [
 pub enum StallStatus {
     /// Updates can still arrive for `remaining_ms`.
     Live { remaining_ms: u64 },
-    /// The window for honest updates has closed. Migrate to a new instance.
+    /// The update window has closed. Migrate to a new instance.
     Stalled,
 }
 

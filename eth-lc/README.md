@@ -129,6 +129,16 @@ An instance stalls when a full sync committee period passes with zero
 qualifying updates. A stalled instance stays readable: claims against the
 headers it recorded keep working. Updates on it are refused.
 
+The stall time (`stale_after_ms`, the start of period P+2 for a store
+finalized in P) is also the expiry of committee keys. Sync-committee
+signatures are not slashable, and `signature_slot` is outside the signed
+message. So a committee's keys can sign an update for the store until the
+window closes. With this bound, P's committee stays usable through P+1, one
+period after its duty ends. A later bound keeps finished committees' keys
+usable for longer. Within the window, a store that missed updates catches up
+with one historical update per period (Beacon API
+`/eth/v1/beacon/light_client/updates`).
+
 Detect:
 
 - Call `eth_lc_host::checkpoint::stall_status(cfg, &store, now_ms)` on the instance store.
@@ -164,7 +174,7 @@ claim. "Liveness" means the participant can only delay progress.
 | Prover | Proves the update or claim transaction | Liveness | The inputs are public chain data. Anyone with the program image can prove, on local hardware or on a prover network. |
 | Submitter | Sends the proven transaction to LEZ | Liveness | Any account can submit, with no relationship to the instance. |
 | Claimant | Submits evidence for an attestation | Liveness, for that claim only | The claimant is the party that wants the attestation. It holds every input it needs. |
-| LEZ sequencer | Orders transactions and supplies the clock | Liveness | The program reads the clock only for the stale window. A late or wrong clock can stall updates. It cannot make the core accept a header. |
+| LEZ sequencer | Orders transactions and supplies the clock | Liveness, and the expiry of committee keys | The program reads the clock only for the update window, and the core checks every header without it. A clock that runs ahead stalls updates. A clock that runs late, or stays below `stale_after_ms`, keeps a finished committee's update includable: the window expires keys only while the clock moves forward. |
 
 Each liveness role is permissionless, and its inputs are public. So a user
 can fill every role alone, with an Ethereum node, a LEZ account and a prover.

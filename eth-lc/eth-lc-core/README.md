@@ -19,7 +19,7 @@ that form.
 | `apply_update(cfg, &store, &UpdateInput)` | Guest entry: one strict store transition. |
 | `get_lc_execution_root(cfg, &header)` | The spec's execution root of a header, at the fork of its own slot. |
 | `validate_light_client_update(..., current_slot)` | The full spec check, read-only. For parity tests and off-chain callers. |
-| `stale_after_ms(cfg, &store)` | Liveness bound: the time at which the store stalls. |
+| `stale_after_ms(cfg, &store)` | End of the update window: the time at which the store stalls and its committees' keys expire. |
 | `claim::check_claim(&record, &claim)` | Checks account, storage and receipt-log claims against a `HeaderRecord`. |
 | `claim::HeaderRecord::from_store(cfg, &store)` | The record of the store's finalized header. |
 
@@ -40,7 +40,10 @@ the committee aggregate and of each non-signer). `eth-lc-host` builds them.
   identity values are part of the trust anchor: verify them against the chain
   with `eth_lc_host::checkpoint::verify_instance_config`. The state bytes keep
   the config, and `Advance` keeps it byte-identical.
-- The LEZ sequencer timestamp is a liveness input only. Safety holds for any timestamp.
+- The core checks every header without the LEZ sequencer timestamp. The
+  timestamp sets the end of the update window, which is the expiry of
+  committee keys. A late or stuck timestamp keeps a finished committee's
+  update includable, so the expiry holds only while the clock moves forward.
 - The store accepts an update signed by the next committee only when its
   finalized header is also in the next period. That update rotates the
   committees. This is a stronger assumption than the spec, and it adds a short

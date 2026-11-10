@@ -158,7 +158,7 @@ Open risks:
 - With idea A an update costs about 0.63M gas units. The consumer or its relayer can submit the update it needs. The daemon only has to guarantee one update per period. This weakens the operator-incentive problem (soft #5).
 
 ### H. Catch-up in one transaction [follows from A]
-- One private execution can verify several consecutive period updates. A stalled instance resumes in one transaction (R.7).
+- One private execution can verify several consecutive period updates. A lagging instance catches up in one transaction while its update window is open (R.7). A stalled instance needs a new `Init`.
 
 ## 6. Experiments to propose
 
