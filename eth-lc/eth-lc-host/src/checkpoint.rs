@@ -1,4 +1,10 @@
-//! Stall detection and checkpoint checks for a new instance.
+//! Stall detection, chain config checks and checkpoint checks for a new instance.
+//!
+//! An instance's trust anchor is its `Init`: the chain config (chain
+//! identity and preset) and the checkpoint. The core checks the preset and
+//! the structure of the identity only. [`verify_instance_config`] checks the
+//! identity against the chain; [`verify_new_checkpoint`] runs it and then
+//! checks the checkpoint.
 //!
 //! A stalled instance stays readable. Recovery deploys a new instance with a
 //! fresh `Init`, anchored at a checkpoint that [`verify_new_checkpoint`]
@@ -7,17 +13,40 @@
 
 use std::fmt;
 
-use eth_lc_core::{initialize_store, stale_after_ms, BootstrapInput, ChainConfig, Root, Store};
-use serde_json::Value;
+use eth_lc_core::{
+    initialize_store, stale_after_ms, BootstrapInput, ChainConfig, LightClientHeader, Root, Store,
+};
+use serde_json::{json, Value};
 
+use crate::evidence::quantity;
+use crate::execution::fetch_header_rlp;
 use crate::forks::{self, json_to_ssz, Kind, Preset, Wire};
-use crate::http::get_json;
+use crate::http::{get_json, rpc};
 
 /// Default mainnet Beacon API endpoints for checkpoint checks.
+///
+/// The Nimbus endpoint answers over plain http only. A network path can alter
+/// its answers, so it is a weaker independent source than the two https ones.
+/// Operators should add their own node.
 pub const DEFAULT_ENDPOINTS: [&str; 3] = [
     "https://ethereum-beacon-api.publicnode.com",
     "https://lodestar-mainnet.chainsafe.io",
-    "https://www.lightclientdata.org",
+    "http://unstable.mainnet.beacon-api.nimbus.team",
+];
+
+/// Default mainnet execution JSON-RPC endpoint for `eth_chainId` and execution headers.
+pub const DEFAULT_RPC: &str = "https://ethereum-rpc.publicnode.com";
+
+/// Beacon API `/eth/v1/config/spec` keys of the fork schedule, phase0 through Gloas.
+const FORK_KEYS: [&str; 8] = [
+    "GENESIS",
+    "ALTAIR",
+    "BELLATRIX",
+    "CAPELLA",
+    "DENEB",
+    "ELECTRA",
+    "FULU",
+    "GLOAS",
 ];
 
 /// Liveness of an instance store at a given time.
@@ -79,6 +108,10 @@ pub enum CheckpointError {
     TooOld { age_ms: u64, max_ms: u64 },
     /// A response failed to decode.
     Decode { endpoint: String, reason: String },
+    /// An endpoint reports another value for a chain config field.
+    ConfigMismatch { endpoint: String, field: String },
+    /// No execution endpoint served the RLP header a Gloas-variant bootstrap needs.
+    MissingExecutionHeader { reason: String },
 }
 
 impl fmt::Display for CheckpointError {
@@ -88,6 +121,104 @@ impl fmt::Display for CheckpointError {
 }
 
 impl std::error::Error for CheckpointError {}
+
+fn hex0x(b: &[u8]) -> String {
+    format!("0x{}", hex::encode(b))
+}
+
+/// The chain config fields of `cfg` as Beacon API strings, with their keys.
+fn expected_fields(cfg: &ChainConfig) -> Vec<(String, String)> {
+    let mut v = vec![
+        ("SECONDS_PER_SLOT".into(), cfg.seconds_per_slot.to_string()),
+        ("SLOTS_PER_EPOCH".into(), cfg.slots_per_epoch.to_string()),
+        (
+            "EPOCHS_PER_SYNC_COMMITTEE_PERIOD".into(),
+            cfg.epochs_per_sync_committee_period.to_string(),
+        ),
+        (
+            "SYNC_COMMITTEE_SIZE".into(),
+            cfg.sync_committee_size.to_string(),
+        ),
+    ];
+    for (key, fork) in FORK_KEYS.iter().zip(&cfg.forks) {
+        v.push((format!("{key}_FORK_VERSION"), hex0x(&fork.version)));
+        if *key != "GENESIS" {
+            v.push((format!("{key}_FORK_EPOCH"), fork.epoch.to_string()));
+        }
+    }
+    v
+}
+
+/// Checks the chain config of an instance against the chain.
+///
+/// Succeeds only when: at least `min_endpoints` Beacon API endpoints answer;
+/// each reports, in `/eth/v1/beacon/genesis` and `/eth/v1/config/spec`, the
+/// config's genesis validators root, genesis time, preset fields, and every
+/// fork version and epoch from phase0 through Gloas; at least one execution
+/// endpoint answers `eth_chainId`; and each that answers reports `chain_id`.
+pub fn verify_instance_config(
+    cfg: &ChainConfig,
+    endpoints: &[String],
+    rpc_urls: &[String],
+    policy: &CheckpointPolicy,
+) -> Result<(), CheckpointError> {
+    let answers: Vec<(String, Value, Value)> = endpoints
+        .iter()
+        .filter_map(|e| {
+            let genesis = get_json(e, "/eth/v1/beacon/genesis").ok()?;
+            let spec = get_json(e, "/eth/v1/config/spec").ok()?;
+            Some((e.clone(), genesis, spec))
+        })
+        .collect();
+    if answers.len() < policy.min_endpoints.max(1) {
+        return Err(CheckpointError::TooFewEndpoints {
+            answered: answers.len(),
+            required: policy.min_endpoints,
+        });
+    }
+    let fields = expected_fields(cfg);
+    for (endpoint, genesis, spec) in &answers {
+        let mismatch = |field: &str| CheckpointError::ConfigMismatch {
+            endpoint: endpoint.clone(),
+            field: field.to_string(),
+        };
+        let g = &genesis["data"];
+        if g["genesis_validators_root"].as_str() != Some(&hex0x(&cfg.genesis_validators_root)) {
+            return Err(CheckpointError::GenesisMismatch {
+                endpoint: endpoint.clone(),
+            });
+        }
+        if g["genesis_time"].as_str() != Some(&cfg.genesis_time.to_string()) {
+            return Err(mismatch("genesis_time"));
+        }
+        for (key, want) in &fields {
+            let got = spec["data"][key].as_str().map(str::to_ascii_lowercase);
+            if got.as_deref() != Some(want.as_str()) {
+                return Err(mismatch(key));
+            }
+        }
+    }
+    let mut chain_ids = 0;
+    for url in rpc_urls {
+        let Ok(id) = rpc(url, "eth_chainId", json!([])) else {
+            continue;
+        };
+        if quantity(&id).ok() != Some(cfg.chain_id) {
+            return Err(CheckpointError::ConfigMismatch {
+                endpoint: url.clone(),
+                field: "chain_id".into(),
+            });
+        }
+        chain_ids += 1;
+    }
+    if chain_ids == 0 {
+        return Err(CheckpointError::TooFewEndpoints {
+            answered: 0,
+            required: 1,
+        });
+    }
+    Ok(())
+}
 
 struct Answer {
     endpoint: String,
@@ -108,20 +239,25 @@ fn ask(endpoint: &str, root_hex: &str) -> anyhow::Result<Answer> {
     })
 }
 
-/// Checks a checkpoint `root` for a new instance and returns its `Init` input.
+/// Checks the chain config and a checkpoint `root` for a new instance and
+/// returns its `Init` input.
 ///
-/// Succeeds only when: at least `min_endpoints` endpoints answer; each
-/// reports `cfg.genesis_validators_root`; each reports `root` as canonical
-/// and finalized; all serve the same bootstrap (compared as SSZ bytes);
+/// Succeeds only when: [`verify_instance_config`] succeeds; at least
+/// `min_endpoints` endpoints answer; each reports `root` as canonical and
+/// finalized; all serve the same bootstrap (compared as SSZ bytes); for a
+/// Gloas-variant bootstrap header, an execution endpoint serves the RLP
+/// header of its `execution_block_hash` (checked by Keccak-256);
 /// `initialize_store` succeeds locally; and the checkpoint is at most
 /// `max_age_epochs` old at `now_ms`.
 pub fn verify_new_checkpoint(
     cfg: &ChainConfig,
     endpoints: &[String],
+    rpc_urls: &[String],
     root: Root,
     now_ms: u64,
     policy: &CheckpointPolicy,
 ) -> Result<BootstrapInput, CheckpointError> {
+    verify_instance_config(cfg, endpoints, rpc_urls, policy)?;
     let root_hex = format!("0x{}", hex::encode(root));
     let answers: Vec<Answer> = endpoints
         .iter()
@@ -182,10 +318,17 @@ pub fn verify_new_checkpoint(
     let raw = forks::decode_bootstrap(fork, preset, Wire::Ssz(&bytes))
         .map_err(|e| decode(e.to_string()))?;
     let bootstrap = forks::to_core_bootstrap(cfg, &raw).map_err(|e| decode(e.to_string()))?;
+    let execution_header_rlp = match &bootstrap.header {
+        LightClientHeader::Gloas {
+            execution_block_hash,
+            ..
+        } => Some(execution_header(rpc_urls, *execution_block_hash)?),
+        _ => None,
+    };
     let input = BootstrapInput {
         trusted_block_root: root,
         bootstrap,
-        execution_header_rlp: None,
+        execution_header_rlp,
     };
     initialize_store(cfg, &input).map_err(CheckpointError::Initialize)?;
 
@@ -199,4 +342,19 @@ pub fn verify_new_checkpoint(
         return Err(CheckpointError::TooOld { age_ms, max_ms });
     }
     Ok(input)
+}
+
+/// The RLP header of `block_hash` from the first execution endpoint that
+/// serves it; `fetch_header_rlp` checks it by Keccak-256.
+fn execution_header(rpc_urls: &[String], block_hash: Root) -> Result<Vec<u8>, CheckpointError> {
+    let mut reasons = Vec::new();
+    for url in rpc_urls {
+        match fetch_header_rlp(url, block_hash) {
+            Ok(rlp) => return Ok(rlp),
+            Err(e) => reasons.push(format!("{url}: {e}")),
+        }
+    }
+    Err(CheckpointError::MissingExecutionHeader {
+        reason: reasons.join("; "),
+    })
 }
