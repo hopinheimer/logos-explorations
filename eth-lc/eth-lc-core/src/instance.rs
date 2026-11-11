@@ -257,12 +257,14 @@ pub struct Advanced {
     pub events: Vec<Event>,
 }
 
-/// Checks that `state` and its `header` belong to the instance of `config`,
-/// and returns its id and the working store.
+/// Checks that `state`, its `header` and `next` (the committee account of
+/// `state.period + 1`, when the state has no next committee) belong to the
+/// instance of `config`, and returns its id and the working store.
 fn base(
     config: &InstanceConfig,
     state: &ConsensusState,
     header: &FinalisedHeader,
+    next: Option<&Committee>,
     pda: &impl Fn(&Root) -> AccountId,
 ) -> Result<(AccountId, Store), Error> {
     let instance = pda(&config.seed());
@@ -273,20 +275,70 @@ fn base(
     {
         return Err(Error::AccountMismatch);
     }
-    Ok((instance, store_of(state, header)))
+    let mut store = store_of(state, header);
+    if let Some(c) = next {
+        if state.next_committee.is_some()
+            || c.instance != instance
+            || c.period != state.period.saturating_add(1)
+        {
+            return Err(Error::AccountMismatch);
+        }
+        store.next_committee_root = Some(c.root);
+    }
+    Ok((instance, store))
 }
 
-/// `Update`: checks `input` against the state it builds on (`state` and its
-/// `header`) under [`apply_update`], and returns what it writes. The update must reach a new
-/// execution block ([`Error::NoProgress`] otherwise).
-pub fn advance(
+/// A handoff without a new header: an update that installs the next
+/// committee and leaves the finalized execution block as it is (a new
+/// instance's first update, for example). The state account at that block
+/// is already written, so the update writes only the `Committee` account of
+/// `state.period + 1`. Later updates pass it to [`advance`] as `next`.
+pub fn hand_off(
     config: &InstanceConfig,
     state: &ConsensusState,
     header: &FinalisedHeader,
     input: &UpdateInput,
     pda: impl Fn(&Root) -> AccountId,
+) -> Result<(Committee, Event), Error> {
+    let (instance, store) = base(config, state, header, None, &pda)?;
+    let cfg = ChainConfig::from_instance(config);
+    let next = apply_update(&cfg, &store, input)?;
+    let root = match next.next_committee_root {
+        Some(root)
+            if store.next_committee_root.is_none()
+                && next.execution.number == header.block_number =>
+        {
+            root
+        }
+        _ => return Err(Error::NoProgress),
+    };
+    let committee = Committee {
+        instance,
+        period: state.period.saturating_add(1),
+        root,
+        handoff_slot: input.update.attested_header.beacon().slot,
+    };
+    let event = Event::CommitteeHandoff {
+        instance,
+        period: committee.period,
+        committee_root: root,
+    };
+    Ok((committee, event))
+}
+
+/// `Update`: checks `input` against the state it builds on (`state`, its
+/// `header`, and `next` when the next committee came by [`hand_off`]) under
+/// [`apply_update`], and returns what it writes. The update must reach a new
+/// execution block ([`Error::NoProgress`] otherwise).
+pub fn advance(
+    config: &InstanceConfig,
+    state: &ConsensusState,
+    header: &FinalisedHeader,
+    next: Option<&Committee>,
+    input: &UpdateInput,
+    pda: impl Fn(&Root) -> AccountId,
 ) -> Result<Advanced, Error> {
-    let (instance, store) = base(config, state, header, &pda)?;
+    let (instance, store) = base(config, state, header, next, &pda)?;
     let cfg = ChainConfig::from_instance(config);
     let next = apply_update(&cfg, &store, input)?;
     if next.execution.number == header.block_number {

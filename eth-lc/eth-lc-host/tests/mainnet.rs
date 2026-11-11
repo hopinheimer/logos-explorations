@@ -48,11 +48,77 @@ fn recorded_chain_syncs_through_four_periods_and_a_finality_update() {
 // ---------------------------------------------------------------------------
 // The instance accounts (proposal section 4), written through `init` and `advance`.
 
-use eth_lc_core::instance::{self, AccountId, FinalisedHeader};
+use eth_lc_core::instance::{self, AccountId, Event, FinalisedHeader, InstanceConfig};
 
 /// A stand-in for the LEZ PDA: the seed itself.
 fn pda(seed: &[u8; 32]) -> AccountId {
     *seed
+}
+
+/// Replays the chain-dir through `init` and `advance`; returns the instance
+/// config, every written header, and every event.
+fn replay_instance(dir: &ChainDir) -> (InstanceConfig, Vec<FinalisedHeader>, Vec<Event>) {
+    let config = dir.cfg.instance_config(dir.bootstrap.trusted_block_root);
+    let first = instance::init(&config, &dir.bootstrap, pda).unwrap();
+    let (mut state, mut header) = (first.state, first.header.clone());
+    let mut headers = vec![first.header];
+    let mut events = Vec::new();
+    let mut handed_off = None;
+    let (before, _) = replay(dir);
+    for (u, store) in dir.all_updates().zip(&before) {
+        let input = dir.update_input(store, u).unwrap();
+        match instance::advance(&config, &state, &header, handed_off.as_ref(), &input, pda) {
+            Ok(out) => {
+                assert_eq!(out.state.parent, state.block_number);
+                events.extend(out.events);
+                state = out.state;
+                header = out.header;
+                headers.push(header.clone());
+                handed_off = None;
+            }
+            // Step 0 installs the first next committee at the checkpoint's block.
+            Err(Error::NoProgress) => {
+                let (committee, event) =
+                    instance::hand_off(&config, &state, &header, &input, pda).unwrap();
+                events.push(event);
+                handed_off = Some(committee);
+            }
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    (config, headers, events)
+}
+
+#[test]
+fn instance_accounts_follow_the_recorded_chain() {
+    let dir = chain();
+    let (config, headers, events) = replay_instance(&dir);
+    let (_, last) = replay(&dir);
+    let tip = headers.last().unwrap();
+    assert_eq!(tip.block_number, last.execution.number);
+    assert_eq!(tip.beacon_root, last.finalized.hash_tree_root());
+    assert_eq!(headers[0].signers, 0);
+    assert!(headers[1..].iter().all(|h| h.signers >= 342));
+    let handoffs: Vec<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::CommitteeHandoff { period, .. } => Some(*period),
+            _ => None,
+        })
+        .collect();
+    let first = dir.cfg.period_at_slot(headers[0].slot);
+    assert_eq!(handoffs, (first + 1..=first + 4).collect::<Vec<_>>());
+    let finalised = events
+        .iter()
+        .filter(|e| matches!(e, Event::HeaderFinalised { .. }))
+        .count();
+    assert_eq!(finalised, headers.len() - 1);
+    assert_eq!(headers.len(), 5);
+    // The update window is the WS period past the state's header.
+    assert_eq!(
+        instance::update_deadline_ms(&config, tip),
+        dir.cfg.slot_start_ms(tip.slot) + 98_304_000
+    );
 }
 
 #[test]
@@ -71,20 +137,50 @@ fn instance_refuses_a_foreign_checkpoint_or_state() {
     let mut other = config.clone();
     other.finality.min_participants = 400;
     assert_eq!(
-        instance::advance(&other, &first.state, &first.header, &input, pda).err(),
+        instance::advance(&other, &first.state, &first.header, None, &input, pda).err(),
         Some(Error::AccountMismatch)
     );
     let mut header = first.header.clone();
     header.block_number += 1;
     assert_eq!(
-        instance::advance(&config, &first.state, &header, &input, pda).err(),
+        instance::advance(&config, &first.state, &header, None, &input, pda).err(),
         Some(Error::AccountMismatch)
     );
-    // Step 0 reaches no new block: `advance` refuses it.
+    // Step 0 reaches no new block: `advance` refuses it, `hand_off` writes the committee.
     assert_eq!(
-        instance::advance(&config, &first.state, &first.header, &input, pda).err(),
+        instance::advance(&config, &first.state, &first.header, None, &input, pda).err(),
         Some(Error::NoProgress)
     );
+    let (committee, _) =
+        instance::hand_off(&config, &first.state, &first.header, &input, pda).unwrap();
+    assert_eq!(committee.period, first.state.period + 1);
+    let mut wrong = committee.clone();
+    wrong.period += 1;
+    let next = initialize_store(&dir.cfg, &dir.bootstrap)
+        .and_then(|s| apply_update(&dir.cfg, &s, &input))
+        .unwrap();
+    let step1 = dir.update_input(&next, &dir.updates[1]).unwrap();
+    assert_eq!(
+        instance::advance(
+            &config,
+            &first.state,
+            &first.header,
+            Some(&wrong),
+            &step1,
+            pda
+        )
+        .err(),
+        Some(Error::AccountMismatch)
+    );
+    assert!(instance::advance(
+        &config,
+        &first.state,
+        &first.header,
+        Some(&committee),
+        &step1,
+        pda
+    )
+    .is_ok());
 }
 
 // ---------------------------------------------------------------------------
@@ -105,11 +201,11 @@ fn evidence_json(name: &str) -> Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
-/// Header of the evidence block: replay the chain-dir, then apply the
-/// finality update recorded with the evidence.
+/// Header of the evidence block: replay the chain-dir through the instance,
+/// then advance by the finality update recorded with the evidence.
 fn anchored_header() -> FinalisedHeader {
     let dir = chain();
-    let config = dir.cfg.instance_config(dir.bootstrap.trusted_block_root);
+    let (config, headers, _) = replay_instance(&dir);
     let (before, _) = replay(&dir);
     let meta = evidence_json("finality-update.json");
     let bytes = std::fs::read(format!(
@@ -120,10 +216,15 @@ fn anchored_header() -> FinalisedHeader {
     let fork = forks::parse_fork(meta["fork"].as_str().unwrap()).unwrap();
     let raw = forks::decode_finality_update(fork, Preset::Mainnet, Wire::Ssz(&bytes)).unwrap();
     let update = forks::to_core_update(&dir.cfg, &raw).unwrap();
+    // The evidence update builds on the state before the chain-dir's own finality update.
     let store = &before[4];
-    let next = apply_update(&dir.cfg, store, &dir.update_input(store, &update).unwrap()).unwrap();
-    let period = dir.cfg.period_at_slot(next.finalized.slot);
-    let header = FinalisedHeader::from_store(&config, pda(&config.seed()), &next, 0, period);
+    let base = &headers[headers.len() - 2];
+    assert_eq!(base.block_number, store.execution.number);
+    let state = instance_state(&config, store, base);
+    let input = dir.update_input(store, &update).unwrap();
+    let header = instance::advance(&config, &state, base, None, &input, pda)
+        .unwrap()
+        .header;
     let block = evidence_json("block.json");
     assert_eq!(
         format!("0x{}", hex::encode(header.block_hash)),
@@ -134,6 +235,24 @@ fn anchored_header() -> FinalisedHeader {
         block["stateRoot"].as_str().unwrap()
     );
     header
+}
+
+/// The consensus state of `store` whose header is `header`.
+fn instance_state(
+    config: &InstanceConfig,
+    store: &Store,
+    header: &FinalisedHeader,
+) -> instance::ConsensusState {
+    let id = pda(&config.seed());
+    instance::ConsensusState {
+        instance: id,
+        block_number: header.block_number,
+        parent: header.block_number,
+        period: chain().cfg.period_at_slot(header.slot),
+        current_committee: store.current_committee_root,
+        next_committee: store.next_committee_root,
+        finalised_header: pda(&instance::header_seed(&id, header.block_number)),
+    }
 }
 
 /// A header with only `receipts_root` set, for receipts outside the recorded chain.

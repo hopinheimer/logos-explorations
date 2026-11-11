@@ -40,7 +40,7 @@ pub mod types;
 pub use config::{ChainConfig, Fork};
 pub use fork::ForkName;
 pub use instance::{
-    advance, init, AccountId, Advanced, ChainBinding, Committee, ConsensusState, Event,
+    advance, hand_off, init, AccountId, Advanced, ChainBinding, Committee, ConsensusState, Event,
     FinalisedHeader, FinalityParams, Initialised, InstanceConfig,
 };
 pub use profile::check_profile;

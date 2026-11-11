@@ -15,7 +15,7 @@ that form.
 |---|---|
 | `InstanceConfig` (`ChainBinding`, `FinalityParams`) | The instance configuration (proposal 4.1): checkpoint, chain identity, fork schedule, `min_participants`, `weak_subjectivity_period`. |
 | `ConsensusState`, `Committee`, `FinalisedHeader`, `Event` | The program's accounts and events (proposal 4.2 to 4.4, 4.8). Each is written once. |
-| `instance::{init, advance}` | The transitions that write those accounts. Seeds: `InstanceConfig::seed`, `instance::{state_seed, committee_seed, header_seed}`. |
+| `instance::{init, hand_off, advance}` | The transitions that write those accounts. `hand_off` takes an update that installs the next committee without a new block (a new instance's first update). Seeds: `InstanceConfig::seed`, `instance::{state_seed, committee_seed, header_seed}`. |
 | `ChainConfig`, `check_profile` | The parameters the sync rules read: an `InstanceConfig` with the pinned preset (`ChainConfig::from_instance`). Never stored. The chain identity and finality parameters pass structural checks. |
 | `ChainConfig::mainnet()`, `sepolia()`, `hoodi()` | Constructors with each chain's values, cross-checked against recorded Beacon API responses. They are conveniences: any chain of the pinned preset passes the same checks. |
 | `initialize_store(cfg, &BootstrapInput)` | `initialize_light_client_store` plus the config check and the execution anchor. The only way to anchor a store. |
@@ -68,7 +68,7 @@ program and sends `Advance` to the public instance. `Attest` checks a claim
 against the instance's finalised header and emits the statement. This
 example keeps one instance account holding `(InstanceConfig, Store)`; the
 proposal's account layout (state, committee and header PDAs) is
-`eth_lc_core::instance::{init, advance}`.
+`eth_lc_core::instance::{init, hand_off, advance}`.
 
 ```rust
 use borsh::{BorshDeserialize, BorshSerialize};
