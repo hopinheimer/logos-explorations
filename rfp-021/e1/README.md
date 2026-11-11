@@ -38,7 +38,7 @@ The program pins the mainnet preset and takes the chain identity from `Init`, so
 | E1a, dev | blinded sender | still recognised as its program; settles |
 | E1a, dev | same transaction replayed | refused by LEZ (commitment already seen) |
 | E1a, **real proof** | toy update, 12.6M cycles | settles with a verified receipt; **895 s** CPU, **13.0 GB** peak, proof **224,813 B** |
-| E1b, dev | **real mainnet update** with committee handoff (period 1902 to 1903, step 1) | settles; private **14,039,371** cycles, public part **20,032** cycles; input 52,204 B stays off chain |
+| E1b, dev | **real mainnet update** with committee handoff (period 1902 to 1903, step 1) | settles; private **14,058,921** cycles, public part **19,959** cycles; input 52,218 B stays off chain |
 | E1b, dev | guest wire and `Update` window, step 1 (`just e1b-window`) | settles at `stale_after_ms - 1`; refused at `stale_after_ms`; one trailing input byte refused. The README guest example (`just consumer-check` in `eth-lc`) passes the same cases, and its `Attest` leaves the timestamp window open |
 | E1b, dev | two instances under one program, steps 1 and 2 (`just e1b-instances`) | an update advances only its own instance; step 1's input sent to the other instance is refused, and neither instance moves |
 | E1b, **real proof** | the same real update | settles with a verified receipt; **1,079 s** CPU, **12.2 GB** peak, transaction **228,299 B** |
@@ -51,7 +51,7 @@ The program pins the mainnet preset and takes the chain identity from `Init`, so
 
 | | Public, 3 transactions (Proposal #224 on v0.3) | Proven, 1 transaction (E1) |
 |---|---|---|
-| Exec gas per update | about 12.6M (126% of one block, over 3 blocks) | 419,311 to 429,796 (4.2% to 4.3% of one block) |
+| Exec gas per update | about 12.6M (126% of one block, over 3 blocks) | 419,311 to 429,723 (4.2% to 4.3% of one block) |
 | Storage gas per update | update material, about 52 KB | 224,063 (the receipt) |
 | Base fee at floor prices | about 101M | about 5.1M (**about 20x less**) |
 | Job state across transactions | yes | none |

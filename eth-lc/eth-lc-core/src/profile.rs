@@ -65,7 +65,21 @@ impl ChainConfig {
         }
     }
 
-    fn with_preset(
+    /// Default `min_participants` of `preset`: two thirds of the committee,
+    /// rounded up (342 of 512).
+    pub fn default_min_participants(preset: Preset) -> u16 {
+        ((2 * preset.sync_committee_size).div_ceil(3)) as u16
+    }
+
+    /// Default `weak_subjectivity_period` of `preset`, in seconds: 256 epochs
+    /// on mainnet, `MIN_VALIDATOR_WITHDRAWABILITY_DELAY`, the floor of
+    /// `compute_weak_subjectivity_period` (`specs/phase0/weak-subjectivity.md`).
+    /// The minimal preset takes one sync committee period.
+    pub fn default_weak_subjectivity_period(preset: Preset) -> u64 {
+        preset.epochs_per_sync_committee_period * preset.slots_per_epoch * preset.seconds_per_slot
+    }
+
+    pub(crate) fn with_preset(
         preset: Preset,
         chain_id: u64,
         genesis_validators_root: Root,
@@ -81,6 +95,8 @@ impl ChainConfig {
             epochs_per_sync_committee_period: preset.epochs_per_sync_committee_period,
             sync_committee_size: preset.sync_committee_size,
             forks,
+            min_participants: Self::default_min_participants(preset),
+            weak_subjectivity_period: Self::default_weak_subjectivity_period(preset),
         }
     }
 
@@ -193,6 +209,9 @@ fn schedule(versions: [u32; FORK_COUNT], epochs: [u64; FORK_COUNT]) -> Vec<Fork>
 ///   for each fork from phase0 through Gloas; phase0 at epoch 0; epochs
 ///   non-decreasing; Capella scheduled (its epoch below `u64::MAX`); fork
 ///   versions pairwise distinct. An unscheduled fork has epoch `u64::MAX`.
+/// - Finality parameters, structural only. Otherwise
+///   [`Error::InvalidChainIdentity`]: `min_participants` from 1 to
+///   `sync_committee_size`; `weak_subjectivity_period` nonzero.
 pub fn check_profile(cfg: &ChainConfig) -> Result<(), Error> {
     let preset = cfg.preset();
     #[cfg(feature = "minimal-profile")]
@@ -211,7 +230,10 @@ pub fn check_profile(cfg: &ChainConfig) -> Result<(), Error> {
         && f[ForkName::Capella as usize].epoch != u64::MAX
         && f.iter()
             .enumerate()
-            .all(|(i, a)| f[i + 1..].iter().all(|b| a.version != b.version));
+            .all(|(i, a)| f[i + 1..].iter().all(|b| a.version != b.version))
+        && cfg.min_participants >= 1
+        && u32::from(cfg.min_participants) <= cfg.sync_committee_size
+        && cfg.weak_subjectivity_period > 0;
     if structural {
         Ok(())
     } else {

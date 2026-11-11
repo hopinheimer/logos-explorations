@@ -28,6 +28,7 @@ pub mod config;
 pub mod crypto;
 pub mod execution;
 pub mod fork;
+pub mod instance;
 pub mod mpt;
 #[cfg(feature = "spec-oracle")]
 pub mod oracle;
@@ -38,6 +39,10 @@ pub mod types;
 
 pub use config::{ChainConfig, Fork};
 pub use fork::ForkName;
+pub use instance::{
+    advance, init, AccountId, Advanced, ChainBinding, Committee, ConsensusState, Event,
+    FinalisedHeader, FinalityParams, Initialised, InstanceConfig,
+};
 pub use profile::check_profile;
 pub use sync::{
     apply_update, get_lc_execution_root, initialize_store, is_valid_light_client_header,
@@ -92,14 +97,19 @@ pub enum Error {
     IdentityKey,
     /// The aggregate signature fails.
     InvalidSignature,
-    /// Participation is below two thirds of the committee.
+    /// Fewer signers than the instance's `min_participants`.
     NoSupermajority,
     /// The update's finality data is empty.
     MissingFinality,
     /// A next-committee signature comes with a finalized header outside the next period.
     AcceptRule,
-    /// The update leaves both the finalized slot and the next committee as they are.
+    /// The update leaves both the finalized slot and the next committee as
+    /// they are, or (in `instance::advance`) reaches no new execution block.
     NoProgress,
+    /// The instance's checkpoint differs from the bootstrap's trusted block root.
+    CheckpointRootMismatch,
+    /// The state, its header and the instance name different accounts.
+    AccountMismatch,
     /// The transition would skip a sync committee period.
     PeriodSkip,
     /// A Gloas-variant header needs the RLP preimage of its execution block.
@@ -122,14 +132,16 @@ pub enum Error {
     InvalidInteger,
     /// The proven receipt is absent from the trie.
     ReceiptAbsent,
-    /// A log index, topic index or data word is out of range.
-    OutOfRange,
-    /// The condition field belongs to another evidence kind.
-    FieldMismatch,
-    /// The claim chain id differs from the record chain id.
+    /// The input names something the fact doesn't carry (a subject, a log
+    /// index, a packed field), or a claim holds no facts.
+    MalformedInput,
+    /// A claimed account, storage value or receipt differs from what its
+    /// trie proof shows.
+    InvalidInclusionProof,
+    /// The claim chain id differs from the header's chain id.
     ChainIdMismatch,
-    /// A condition evaluates to false.
-    ConditionFailed,
+    /// A condition evaluates to false, or a log comes from a reverted transaction.
+    ConditionUnsatisfied,
 }
 
 impl core::fmt::Display for Error {

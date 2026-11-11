@@ -340,7 +340,7 @@ pub(crate) fn apply_light_client_update(
 /// The guest entry: a store transition under the strict policy.
 ///
 /// Order: profile check; every check of `validate_light_client_update`
-/// except the `current_slot` bound; participation of at least two thirds;
+/// except the `current_slot` bound; at least `min_participants` signers;
 /// finality present; accept rule (a next-committee signature needs a
 /// next-period finalized header); progress (a greater finalized slot or
 /// `update_has_finalized_next_sync_committee`); the spec transition; the
@@ -349,7 +349,7 @@ pub fn apply_update(cfg: &ChainConfig, store: &Store, input: &UpdateInput) -> Re
     check_profile(cfg)?;
     let update = &input.update;
     let v = validate(cfg, store, update, &input.committee, &input.hints)?;
-    if (v.participants as u64) * 3 < (cfg.sync_committee_size as u64) * 2 {
+    if v.participants < u32::from(cfg.min_participants) {
         return Err(Error::NoSupermajority);
     }
     let Some((finalized, _)) = &update.finality else {
@@ -378,19 +378,17 @@ pub fn apply_update(cfg: &ChainConfig, store: &Store, input: &UpdateInput) -> Re
     Ok(next)
 }
 
-/// End of the update window: the start (Unix ms) of the period two after the
-/// store's finalized period P. Honest updates signed in P+1 stay valid and
-/// fetchable after this time; the guest refuses them anyway, and the instance
-/// is stalled.
+/// End of the update window (Unix ms): `weak_subjectivity_period` seconds
+/// after the start of the store's finalized slot. Past it the guest refuses
+/// updates, the instance is stalled, and a new instance replaces it.
 ///
 /// The bound is the expiry of committee keys. `signature_slot` is outside the
 /// signed message, so a committee can sign an update for this store for as
-/// long as the window is open. P's committee stays usable through P+1, one
-/// period after its duty ends. The expiry holds only while the sequencer
+/// long as the window is open. The expiry holds only while the sequencer
 /// clock moves forward.
 pub fn stale_after_ms(cfg: &ChainConfig, store: &Store) -> u64 {
-    let period = cfg.period_at_slot(store.finalized.slot);
-    cfg.slot_start_ms(cfg.period_start_slot(period.saturating_add(2)))
+    cfg.slot_start_ms(store.finalized.slot)
+        .saturating_add(cfg.weak_subjectivity_period.saturating_mul(1000))
 }
 
 #[cfg(test)]
@@ -402,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_after_at_period_boundaries() {
+    fn stale_after_is_the_ws_period_past_the_finalized_slot() {
         let cfg = mainnet();
         let store = |slot| Store {
             finalized: crate::types::BeaconBlockHeader {
@@ -413,22 +411,14 @@ mod tests {
             current_committee_root: [0; 32],
             next_committee_root: None,
         };
-        let period_ms = 8192 * 12 * 1000;
         let genesis_ms = 1_606_824_023_000u64;
-        // First and last slot of period 1: stale at the start of period 3.
-        assert_eq!(
-            stale_after_ms(&cfg, &store(8192)),
-            genesis_ms + 3 * period_ms
-        );
-        assert_eq!(
-            stale_after_ms(&cfg, &store(16383)),
-            genesis_ms + 3 * period_ms
-        );
-        // First slot of period 2: stale at the start of period 4.
-        assert_eq!(
-            stale_after_ms(&cfg, &store(16384)),
-            genesis_ms + 4 * period_ms
-        );
+        assert_eq!(cfg.weak_subjectivity_period, 98_304);
+        for slot in [0u64, 8192, 16383] {
+            assert_eq!(
+                stale_after_ms(&cfg, &store(slot)),
+                genesis_ms + slot * 12_000 + 98_304_000
+            );
+        }
         assert_eq!(stale_after_ms(&cfg, &store(u64::MAX)), u64::MAX);
     }
 }

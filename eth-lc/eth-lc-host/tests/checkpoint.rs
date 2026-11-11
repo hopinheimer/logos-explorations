@@ -462,7 +462,7 @@ fn sepolia_live() {
 }
 
 #[test]
-fn stall_status_at_period_boundaries() {
+fn stall_status_at_the_ws_period() {
     let cfg = ChainConfig::mainnet();
     let store = |slot| Store {
         finalized: BeaconBlockHeader {
@@ -473,23 +473,19 @@ fn stall_status_at_period_boundaries() {
         current_committee_root: [0; 32],
         next_committee_root: None,
     };
-    let period = 8192;
-    let s = store(1902 * period);
-    let stale = cfg.slot_start_ms(1904 * period);
+    let slot = 1902 * 8192 + 100;
+    let s = store(slot);
+    let stale = cfg.slot_start_ms(slot) + cfg.weak_subjectivity_period * 1000;
     assert_eq!(
         stall_status(&cfg, &s, stale - 1),
         StallStatus::Live { remaining_ms: 1 }
     );
     assert_eq!(stall_status(&cfg, &s, stale), StallStatus::Stalled);
-    // The last slot of the period has the same bound as the first.
+    // A later finalized slot moves the bound by the same amount.
     assert_eq!(
-        stall_status(&cfg, &store(1903 * period - 1), stale),
-        StallStatus::Stalled
-    );
-    assert_eq!(
-        stall_status(&cfg, &store(1903 * period), stale),
+        stall_status(&cfg, &store(slot + 1), stale),
         StallStatus::Live {
-            remaining_ms: 8192 * 12 * 1000
+            remaining_ms: 12_000
         }
     );
 }

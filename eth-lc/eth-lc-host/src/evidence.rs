@@ -8,7 +8,7 @@ use alloy_rlp::{Encodable, Header};
 use alloy_trie::proof::ProofRetainer;
 use alloy_trie::{HashBuilder, Nibbles};
 use anyhow::{bail, ensure, Context, Result};
-use eth_lc_core::claim::Evidence;
+use eth_lc_core::claim::{EthAccount, Proof};
 use serde_json::Value;
 
 /// Bytes of a `0x` hex string.
@@ -37,32 +37,58 @@ fn nodes(v: &Value) -> Result<Vec<Vec<u8>>> {
         .collect()
 }
 
-/// `Evidence::Account` from an `eth_getProof` result.
-pub fn account_from_get_proof(proof: &Value) -> Result<Evidence> {
-    Ok(Evidence::Account {
+/// A `0x` hex quantity of up to 32 bytes, left-padded to a 32-byte word.
+fn word(v: &Value) -> Result<[u8; 32]> {
+    let b = uint_bytes(v)?;
+    ensure!(b.len() <= 32, "quantity longer than 32 bytes");
+    let mut out = [0u8; 32];
+    out[32 - b.len()..].copy_from_slice(&b);
+    Ok(out)
+}
+
+/// The account of an `eth_getProof` result. Clients report an absent account
+/// with zero `storageHash` and `codeHash`; it maps to [`EthAccount::empty`],
+/// the value the core reads for an absent account.
+fn eth_account(proof: &Value) -> Result<EthAccount> {
+    let zero = [0u8; 32];
+    if hex_array::<32>(&proof["storageHash"])? == zero
+        && hex_array::<32>(&proof["codeHash"])? == zero
+    {
+        return Ok(EthAccount::empty());
+    }
+    Ok(EthAccount {
+        nonce: quantity(&proof["nonce"])?,
+        balance: word(&proof["balance"])?,
+        storage_root: hex_array(&proof["storageHash"])?,
+        code_hash: hex_array(&proof["codeHash"])?,
+    })
+}
+
+/// `Proof::Account` from an `eth_getProof` result.
+pub fn account_from_get_proof(proof: &Value) -> Result<Proof> {
+    Ok(Proof::Account {
         address: hex_array(&proof["address"])?,
+        account: eth_account(proof)?,
         account_proof: nodes(&proof["accountProof"])?,
     })
 }
 
-/// `Evidence::Storage` for storage proof `i` of an `eth_getProof` result.
-pub fn storage_from_proof_value(proof: &Value, i: usize) -> Result<Evidence> {
+/// `Proof::Storage` for storage proof `i` of an `eth_getProof` result.
+pub fn storage_from_proof_value(proof: &Value, i: usize) -> Result<Proof> {
     let sp = &proof["storageProof"][i];
-    let key = hex_bytes(&sp["key"])?;
-    ensure!(key.len() <= 32, "storage key longer than 32 bytes");
-    let mut k = [0u8; 32];
-    k[32 - key.len()..].copy_from_slice(&key);
-    Ok(Evidence::Storage {
+    Ok(Proof::Storage {
         address: hex_array(&proof["address"])?,
+        account: eth_account(proof)?,
         account_proof: nodes(&proof["accountProof"])?,
-        key: k,
+        slot: word(&sp["key"])?,
+        value: word(&sp["value"])?,
         storage_proof: nodes(&sp["proof"])?,
     })
 }
 
-/// `Evidence::Storage` for the first storage proof of a recorded
+/// `Proof::Storage` for the first storage proof of a recorded
 /// `eth_getProof` result file.
-pub fn storage_from_get_proof(path: impl AsRef<Path>) -> Result<Evidence> {
+pub fn storage_from_get_proof(path: impl AsRef<Path>) -> Result<Proof> {
     let v: Value = serde_json::from_slice(&std::fs::read(path)?)?;
     storage_from_proof_value(&v, 0)
 }
@@ -161,18 +187,20 @@ pub fn receipt_proof(receipts: &[Value], tx_index: u64) -> Result<(B256, Vec<Vec
     Ok((root, proof))
 }
 
-/// `Evidence::ReceiptLog` for `tx_index` / `log_index` of a block's receipts.
-pub fn receipt_log_evidence(
-    receipts: &[Value],
-    tx_index: u64,
-    log_index: u32,
-) -> Result<(B256, Evidence)> {
-    let (root, receipt_proof) = receipt_proof(receipts, tx_index)?;
+/// `Proof::Log` for `tx_index` / `log_index` of a block's receipts.
+pub fn log_proof(receipts: &[Value], tx_index: u64, log_index: u64) -> Result<(B256, Proof)> {
+    let (root, proof) = receipt_proof(receipts, tx_index)?;
+    let receipt = receipt_encoding(
+        receipts
+            .get(tx_index as usize)
+            .context("tx_index past the block's receipts")?,
+    )?;
     Ok((
         root,
-        Evidence::ReceiptLog {
+        Proof::Log {
             tx_index,
-            receipt_proof,
+            receipt,
+            proof,
             log_index,
         },
     ))

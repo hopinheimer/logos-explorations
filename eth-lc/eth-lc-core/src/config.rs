@@ -17,10 +17,12 @@ pub struct Fork {
     pub epoch: u64,
 }
 
-/// Chain parameters the light client reads. `forks` lists the schedule from
-/// genesis (phase0) through Gloas, in order. Only pinned profiles pass
-/// [`crate::check_profile`].
-#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
+/// The parameters the light client reads: an instance's
+/// [`crate::instance::InstanceConfig`] (less its checkpoint) with the pinned
+/// preset. Built from that config, never stored. `forks` lists the schedule
+/// from genesis (phase0) through Gloas, in order. [`crate::check_profile`]
+/// checks it.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ChainConfig {
     pub chain_id: u64,
     pub genesis_validators_root: Root,
@@ -30,6 +32,10 @@ pub struct ChainConfig {
     pub epochs_per_sync_committee_period: u64,
     pub sync_committee_size: u32,
     pub forks: Vec<Fork>,
+    /// Signers an update needs, of `sync_committee_size`.
+    pub min_participants: u16,
+    /// Seconds after the store's finalized slot at which updates stop.
+    pub weak_subjectivity_period: u64,
 }
 
 impl ChainConfig {

@@ -3,7 +3,7 @@
 
 use borsh::BorshSerialize;
 use eth_lc_core::claim::{
-    Attestation, Claim, Condition, Evidence, Field, HeaderRecord, Op, Subject,
+    Claim, Class, Condition, EthAccount, Fact, Op, Proof, ProvenFact, Statement, Subject,
 };
 use eth_lc_core::crypto::sha256;
 fn mainnet() -> ChainConfig {
@@ -104,23 +104,71 @@ fn store() -> Store {
     }
 }
 
-fn record() -> HeaderRecord {
-    HeaderRecord::from_store(&mainnet(), &store())
+fn config() -> InstanceConfig {
+    mainnet().instance_config([29; 32])
+}
+
+fn header() -> FinalisedHeader {
+    FinalisedHeader {
+        instance: [30; 32],
+        chain: config().chain,
+        slot: 31,
+        beacon_root: [32; 32],
+        block_number: 33,
+        block_hash: [34; 32],
+        state_root: [35; 32],
+        receipts_root: [36; 32],
+        signers: 400,
+        committee_period: 37,
+    }
+}
+
+fn account() -> EthAccount {
+    EthAccount {
+        nonce: 38,
+        balance: [39; 32],
+        storage_root: [40; 32],
+        code_hash: [41; 32],
+    }
+}
+
+fn condition() -> Condition {
+    Condition {
+        subject: Subject::StorageValue {
+            offset: 2,
+            width: 3,
+        },
+        op: Op::AtLeast,
+        rhs: [42; 32],
+    }
 }
 
 fn claim() -> Claim {
     Claim {
         chain_id: 1,
-        evidence: Evidence::Storage {
-            address: [29; 20],
-            account_proof: vec![vec![30]],
-            key: [31; 32],
-            storage_proof: vec![vec![32]],
-        },
-        conditions: vec![Condition {
-            field: Field::LogTopic(2),
-            op: Op::Ge,
-            value: [33; 32],
+        facts: vec![Fact {
+            proof: Proof::Storage {
+                address: [43; 20],
+                account: account(),
+                account_proof: vec![vec![44]],
+                slot: [45; 32],
+                value: [46; 32],
+                storage_proof: vec![vec![47]],
+            },
+            conditions: vec![condition()],
+        }],
+    }
+}
+
+fn statement() -> Statement {
+    Statement {
+        instance: [48; 32],
+        chain_id: 1,
+        block_number: 49,
+        facts: vec![ProvenFact {
+            class: Class::Occurrence,
+            id: [50; 32],
+            conditions: vec![condition()],
         }],
     }
 }
@@ -136,7 +184,7 @@ fn golden_encodings() {
                 epoch: 5,
             }),
         ),
-        ("ChainConfig mainnet", digest(&mainnet())),
+        ("InstanceConfig mainnet", digest(&config())),
         ("BeaconBlockHeader", digest(&beacon())),
         ("ExecutionPayloadHeaderCapella", digest(&capella())),
         ("ExecutionPayloadHeaderDeneb", digest(&deneb())),
@@ -185,39 +233,70 @@ fn golden_encodings() {
                 execution_header_rlp: None,
             }),
         ),
-        ("(ChainConfig, Store)", digest(&(mainnet(), store()))),
-        ("HeaderRecord", digest(&record())),
         (
-            "Subject::Log",
-            digest(&Subject::Log {
-                tx_index: 40,
-                log_index: 41,
+            "ConsensusState",
+            digest(&ConsensusState {
+                instance: [51; 32],
+                block_number: 52,
+                parent: 53,
+                period: 54,
+                current_committee: [55; 32],
+                next_committee: Some([56; 32]),
+                finalised_header: [57; 32],
             }),
         ),
         (
-            "Evidence::ReceiptLog",
-            digest(&Evidence::ReceiptLog {
-                tx_index: 42,
-                receipt_proof: vec![vec![43, 44]],
-                log_index: 45,
+            "Committee",
+            digest(&Committee {
+                instance: [58; 32],
+                period: 59,
+                root: [60; 32],
+                handoff_slot: 61,
+            }),
+        ),
+        ("FinalisedHeader", digest(&header())),
+        ("Condition", digest(&condition())),
+        ("Subject::LogDataWord", digest(&Subject::LogDataWord(62))),
+        ("Op::Less", digest(&Op::Less)),
+        ("Claim", digest(&claim())),
+        (
+            "Proof::Log",
+            digest(&Proof::Log {
+                tx_index: 63,
+                receipt: vec![64, 65],
+                proof: vec![vec![66]],
+                log_index: 67,
             }),
         ),
         (
-            "Evidence::Account",
-            digest(&Evidence::Account {
-                address: [46; 20],
+            "Proof::Account",
+            digest(&Proof::Account {
+                address: [68; 20],
+                account: account(),
                 account_proof: vec![],
             }),
         ),
-        ("Field::LogDataWord", digest(&Field::LogDataWord(47))),
-        ("Op::Lt", digest(&Op::Lt)),
-        ("Claim", digest(&claim())),
+        ("Statement", digest(&statement())),
         (
-            "Attestation",
-            digest(&Attestation {
-                record: record(),
-                subject: Subject::Account { address: [48; 20] },
-                conditions: claim().conditions,
+            "Event::CommitteeHandoff",
+            digest(&Event::CommitteeHandoff {
+                instance: [69; 32],
+                period: 70,
+                committee_root: [71; 32],
+            }),
+        ),
+        (
+            "Event::HeaderFinalised",
+            digest(&Event::HeaderFinalised {
+                instance: [72; 32],
+                block_number: 73,
+                header: [74; 32],
+            }),
+        ),
+        (
+            "Event::Attested",
+            digest(&Event::Attested {
+                statement: statement(),
             }),
         ),
     ];
@@ -233,7 +312,7 @@ fn golden_encodings() {
 /// `(type, "length sha256-prefix")` of each encoding.
 const GOLDEN: &[(&str, &str)] = &[
     ("Fork", "12 89e68c2b49a8b038"),
-    ("ChainConfig mainnet", "176 a37d59c5df2fb874"),
+    ("InstanceConfig mainnet", "190 0b26e80a6e44885a"),
     ("BeaconBlockHeader", "112 6a74b6d31d1c523c"),
     ("ExecutionPayloadHeaderCapella", "570 5b39febf2a094902"),
     ("ExecutionPayloadHeaderDeneb", "586 9ac34d9a09a690bc"),
@@ -247,13 +326,17 @@ const GOLDEN: &[(&str, &str)] = &[
     ("KeyHints", "200 289eaa755ef03658"),
     ("UpdateInput", "2056 24273338a56762c1"),
     ("BootstrapInput", "904 45b54820f494ee6d"),
-    ("(ChainConfig, Store)", "457 5d3623ced8f389db"),
-    ("HeaderRecord", "152 de1f4c31af1abff1"),
-    ("Subject::Log", "13 b4b80b026f0beb62"),
-    ("Evidence::ReceiptLog", "23 72eaa9c5bafa2167"),
-    ("Evidence::Account", "25 edd70a7008195d57"),
-    ("Field::LogDataWord", "5 05c2f294571495f3"),
-    ("Op::Lt", "1 dbc1b4c900ffe48d"),
-    ("Claim", "118 33ebb9b7896b0910"),
-    ("Attestation", "212 bbd165bd8dc14ebf"),
+    ("ConsensusState", "153 c9a2ec750bf5cc6a"),
+    ("Committee", "80 4ba39713f332eabe"),
+    ("FinalisedHeader", "226 2a3b00603a9a8b58"),
+    ("Condition", "36 6e37b5e061635d93"),
+    ("Subject::LogDataWord", "2 3b7d11628fc2f0c9"),
+    ("Op::Less", "1 dbc1b4c900ffe48d"),
+    ("Claim", "259 bb7d9d6e58febd52"),
+    ("Proof::Log", "32 c22e846ed1672831"),
+    ("Proof::Account", "129 6c4d77a3b0a3aef8"),
+    ("Statement", "125 5b21dec7fe3a6de3"),
+    ("Event::CommitteeHandoff", "73 6aa49776cdf22424"),
+    ("Event::HeaderFinalised", "73 bb772b72d12520ad"),
+    ("Event::Attested", "126 6da74b12119969b2"),
 ];

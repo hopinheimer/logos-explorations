@@ -1,142 +1,175 @@
-//! Claims about execution state and receipts, checked against a header record.
+//! Predicates, claims and verified statements (proposal sections 4.5 to 4.7),
+//! checked against a [`FinalisedHeader`].
 //!
 //! Sources: Yellow Paper 4.1 (account state), 4.3 (header), 4.4.1
 //! (receipts), App. B (RLP), App. D (trie); EIP-1186 (account and storage
 //! proofs); EIP-2718 (typed receipts) with the receipt payloads of EIP-2930,
 //! EIP-1559, EIP-4844 and EIP-7702.
-//!
-//! An [`Attestation`] is plain data. It is a result for the program that
-//! ran [`check_claim`]. A consumer that needs authentication re-checks the
-//! claim against a store or record it holds itself.
 
 use alloc::vec::Vec;
 
 use alloy_rlp::Encodable;
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::config::ChainConfig;
-use crate::crypto::keccak256;
+use crate::crypto::{keccak256, sha256};
+use crate::instance::{AccountId, FinalisedHeader};
 use crate::mpt::{self, list_items, Item, EMPTY_TRIE_ROOT};
-use crate::types::{Root, Store};
+use crate::types::Root;
 use crate::Error;
 
-/// A finalized execution block as a light-client store records it. Records
-/// are keyed by beacon slot: two beacon slots can name the same execution
-/// block at Gloas.
+/// Section 4.5. `subject op rhs`. `rhs` is a uint, an int (two's
+/// complement), an address or a bytes32, as a 32-byte word.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
-pub struct HeaderRecord {
-    pub chain_id: u64,
-    pub slot: u64,
-    pub beacon_root: Root,
-    pub block_number: u64,
-    pub block_hash: Root,
-    pub state_root: Root,
-    pub receipts_root: Root,
+pub struct Condition {
+    pub subject: Subject,
+    pub op: Op,
+    pub rhs: [u8; 32],
 }
 
-impl HeaderRecord {
-    /// The record of `store`'s finalized header.
-    pub fn from_store(cfg: &ChainConfig, store: &Store) -> Self {
+/// A value of the fact a condition reads, as a 32-byte big-endian word.
+/// A subject the fact doesn't carry is refused ([`Error::MalformedInput`]),
+/// never read as zero.
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Subject {
+    AccountBalance,
+    AccountNonce,
+    AccountCodeHash,
+    /// A packed field within the slot: `width` bytes, `offset` bytes from the
+    /// low-order end, right-aligned.
+    StorageValue {
+        offset: u8,
+        width: u8,
+    },
+    LogEmitter,
+    LogTopic(u8),
+    LogDataWord(u8),
+    LogTopicCount,
+    LogDataLength,
+}
+
+/// Comparison of two 32-byte words, unsigned big-endian. `AtLeast` is `>=`.
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Op {
+    Equal,
+    NotEqual,
+    Less,
+    AtMost,
+    Greater,
+    AtLeast,
+}
+
+/// Section 4.6. What the consumer asks: facts proven against one finalised
+/// header, all of which must hold.
+#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Claim {
+    /// The chain the consumer expects; refused on another (F.5).
+    pub chain_id: u64,
+    /// Each proven under the same header; all must hold.
+    pub facts: Vec<Fact>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Fact {
+    /// What is proven.
+    pub proof: Proof,
+    /// What must hold of the values it establishes.
+    pub conditions: Vec<Condition>,
+}
+
+/// An Ethereum account (Yellow Paper 4.1).
+#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
+pub struct EthAccount {
+    pub nonce: u64,
+    pub balance: Root,
+    pub storage_root: Root,
+    pub code_hash: Root,
+}
+
+impl EthAccount {
+    /// An absent account: nonce 0, balance 0, the empty storage root and
+    /// `keccak256("")` as code hash.
+    pub fn empty() -> Self {
         Self {
-            chain_id: cfg.chain_id,
-            slot: store.finalized.slot,
-            beacon_root: store.finalized.hash_tree_root(),
-            block_number: store.execution.number,
-            block_hash: store.execution.block_hash,
-            state_root: store.execution.state_root,
-            receipts_root: store.execution.receipts_root,
+            nonce: 0,
+            balance: [0; 32],
+            storage_root: EMPTY_TRIE_ROOT,
+            code_hash: keccak256(&[]),
         }
     }
 }
 
-/// What a claim is about.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
-pub enum Subject {
-    Account { address: [u8; 20] },
-    Storage { address: [u8; 20], key: Root },
-    Log { tx_index: u64, log_index: u32 },
-}
-
-/// Trie proofs behind a claim.
-#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
-pub enum Evidence {
-    /// EIP-1186 `accountProof`.
-    Account {
-        address: [u8; 20],
-        account_proof: Vec<Vec<u8>>,
+pub enum Proof {
+    /// Under `receipts_root`: `receipt` at `rlp(tx_index)`, and its log `log_index`.
+    Log {
+        tx_index: u64,
+        receipt: Vec<u8>,
+        proof: Vec<Vec<u8>>,
+        log_index: u64,
     },
-    /// EIP-1186 `accountProof` and one `storageProof`.
+    /// Under `state_root`: `account` at `address`, and `value` at `slot` of its storage.
     Storage {
         address: [u8; 20],
+        account: EthAccount,
         account_proof: Vec<Vec<u8>>,
-        key: Root,
+        slot: Root,
+        value: Root,
         storage_proof: Vec<Vec<u8>>,
     },
-    /// Receipt trie proof for `rlp(tx_index)`, and the log within the receipt.
-    ReceiptLog {
-        tx_index: u64,
-        receipt_proof: Vec<Vec<u8>>,
-        log_index: u32,
+    /// Under `state_root`: `account` at `address`.
+    Account {
+        address: [u8; 20],
+        account: EthAccount,
+        account_proof: Vec<Vec<u8>>,
     },
 }
 
-/// A value a condition reads. Integers and addresses are left-padded to 32
-/// bytes, big-endian.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Field {
-    Nonce,
-    Balance,
-    StorageRoot,
-    CodeHash,
-    StorageValue,
-    LogAddress,
-    LogTopic(u8),
-    LogDataWord(u32),
-}
-
-/// Comparison of two 32-byte big-endian values.
-#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Op {
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-}
-
-/// `field op value`.
+/// Section 4.7. A claim that holds.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
-pub struct Condition {
-    pub field: Field,
-    pub op: Op,
-    pub value: Root,
-}
-
-/// Evidence and the conditions it must satisfy.
-#[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
-pub struct Claim {
+pub struct Statement {
+    /// `instance_id`: the instance whose header was used (F.15).
+    pub instance: AccountId,
+    /// The chain it is about (F.5).
     pub chain_id: u64,
-    pub evidence: Evidence,
-    pub conditions: Vec<Condition>,
+    /// The block the facts were proven under.
+    pub block_number: u64,
+    /// One per fact, in the claim's order.
+    pub facts: Vec<ProvenFact>,
 }
 
-/// The result of a successful [`check_claim`]. Unauthenticated: see the
-/// module docs.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
-pub struct Attestation {
-    pub record: HeaderRecord,
-    pub subject: Subject,
+pub struct ProvenFact {
+    pub class: Class,
+    pub id: Root,
+    /// What was asserted of it.
     pub conditions: Vec<Condition>,
 }
 
-/// Account fields (Yellow Paper 4.1). Absent accounts read as nonce 0,
-/// balance 0, the empty storage root and `keccak256("")` as code hash.
-struct Account {
-    nonce: Root,
-    balance: Root,
-    storage_root: Root,
-    code_hash: Root,
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Class {
+    /// Logs: one ID per event, safe as a one-shot nullifier.
+    Occurrence,
+    /// Storage, account: same state, same ID at any block.
+    State,
+}
+
+/// Domain tag of fact IDs.
+pub const FACT_ID_TAG: &[u8] = b"eth_lc/statement/v1";
+
+/// `SHA-256("eth_lc/statement/v1" ‖ chain_id ‖ kind ‖ fields)`. Integers are
+/// big-endian: `chain_id`, `tx_index`, `log_index`, `nonce` and `len(data)`
+/// as 8 bytes, `kind` and `n_topics` as 1 byte. Fields per kind:
+///
+/// - storage (0): `address ‖ slot ‖ value`
+/// - log (1): `block_hash ‖ tx_index ‖ log_index ‖ emitter ‖ n_topics ‖ topics ‖ len(data) ‖ data`
+/// - account (2): `address ‖ nonce ‖ balance ‖ code_hash`
+fn fact_id(chain_id: u64, kind: u8, fields: &[&[u8]]) -> Root {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(FACT_ID_TAG);
+    buf.extend_from_slice(&chain_id.to_be_bytes());
+    buf.push(kind);
+    fields.iter().for_each(|f| buf.extend_from_slice(f));
+    sha256(&buf)
 }
 
 /// A canonical RLP integer (minimal big-endian bytes, at most 32), left-padded.
@@ -159,21 +192,24 @@ fn bytes32(it: &Item, err: Error) -> Result<Root, Error> {
     Ok(out)
 }
 
-fn account(state_root: &Root, address: &[u8; 20], proof: &[Vec<u8>]) -> Result<Account, Error> {
+/// The account at `address` under `state_root`. An absent account reads as
+/// [`EthAccount::empty`].
+fn account(state_root: &Root, address: &[u8; 20], proof: &[Vec<u8>]) -> Result<EthAccount, Error> {
     match mpt::get(state_root, &keccak256(address), proof)? {
-        None => Ok(Account {
-            nonce: [0; 32],
-            balance: [0; 32],
-            storage_root: EMPTY_TRIE_ROOT,
-            code_hash: keccak256(&[]),
-        }),
+        None => Ok(EthAccount::empty()),
         Some(rlp) => {
             let items = list_items(&rlp).map_err(|_| Error::InvalidAccount)?;
             let [n, b, s, c] = items.as_slice() else {
                 return Err(Error::InvalidAccount);
             };
-            Ok(Account {
-                nonce: uint(n)?,
+            let nonce = uint(n)?;
+            if nonce[..24] != [0; 24] {
+                return Err(Error::InvalidInteger);
+            }
+            let mut low = [0u8; 8];
+            low.copy_from_slice(&nonce[24..]);
+            Ok(EthAccount {
+                nonce: u64::from_be_bytes(low),
                 balance: uint(b)?,
                 storage_root: bytes32(s, Error::InvalidAccount)?,
                 code_hash: bytes32(c, Error::InvalidAccount)?,
@@ -204,8 +240,9 @@ struct Log {
 }
 
 /// Decodes a receipt trie value: legacy (`>= 0xc0`) or typed `0x01` to
-/// `0x04`, each `rlp([status_or_root, cumulative_gas_used, logs_bloom, logs])`.
-fn receipt_logs(value: &[u8]) -> Result<Vec<Log>, Error> {
+/// `0x04`, each `rlp([status, cumulative_gas_used, logs_bloom, logs])`.
+/// Returns whether the transaction succeeded (`status` 1) and its logs.
+fn receipt(value: &[u8]) -> Result<(bool, Vec<Log>), Error> {
     let body = match value.first() {
         Some(&b) if b >= 0xc0 => value,
         Some(0x01..=0x04) => &value[1..],
@@ -220,6 +257,7 @@ fn receipt_logs(value: &[u8]) -> Result<Vec<Log>, Error> {
         return Err(Error::InvalidReceipt);
     }
     uint(gas).map_err(|_| Error::InvalidReceipt)?;
+    let succeeded = status.payload == [1];
     let mut out = Vec::new();
     let mut rest = logs.payload;
     while !rest.is_empty() {
@@ -245,120 +283,212 @@ fn receipt_logs(value: &[u8]) -> Result<Vec<Log>, Error> {
             data: data.payload.to_vec(),
         });
     }
-    Ok(out)
+    Ok((succeeded, out))
 }
 
 fn compare(a: &Root, op: Op, b: &Root) -> bool {
     match op {
-        Op::Eq => a == b,
-        Op::Ne => a != b,
-        Op::Lt => a < b,
-        Op::Le => a <= b,
-        Op::Gt => a > b,
-        Op::Ge => a >= b,
+        Op::Equal => a == b,
+        Op::NotEqual => a != b,
+        Op::Less => a < b,
+        Op::AtMost => a <= b,
+        Op::Greater => a > b,
+        Op::AtLeast => a >= b,
     }
 }
 
-/// Checks `claim` against `record` and returns what it proves.
-///
-/// Rules: chain ids match; account at `keccak256(address)` under the state
-/// root; storage at `keccak256(key)` under the account's storage root;
-/// receipt at `rlp(tx_index)` under the receipts root. Absent accounts and
-/// slots read as zero values; an absent receipt fails. Each condition's field
-/// must belong to the evidence kind, and each condition must hold.
-pub fn check_claim(record: &HeaderRecord, claim: &Claim) -> Result<Attestation, Error> {
-    if claim.chain_id != record.chain_id {
-        return Err(Error::ChainIdMismatch);
+fn word_of(n: u64) -> Root {
+    let mut out = [0u8; 32];
+    out[24..].copy_from_slice(&n.to_be_bytes());
+    out
+}
+
+fn address_word(a: &[u8; 20]) -> Root {
+    let mut out = [0u8; 32];
+    out[12..].copy_from_slice(a);
+    out
+}
+
+/// `width` bytes of `value`, `offset` bytes from the low-order end, right-aligned.
+fn packed(value: &Root, offset: u8, width: u8) -> Result<Root, Error> {
+    let (o, w) = (offset as usize, width as usize);
+    if w == 0 || o + w > 32 {
+        return Err(Error::MalformedInput);
     }
-    let (subject, read): (
-        Subject,
-        alloc::boxed::Box<dyn Fn(Field) -> Result<Root, Error>>,
-    ) = match &claim.evidence {
-        Evidence::Account {
+    let mut out = [0u8; 32];
+    out[32 - w..].copy_from_slice(&value[32 - o - w..32 - o]);
+    Ok(out)
+}
+
+fn account_subject(a: &EthAccount, s: Subject) -> Option<Root> {
+    match s {
+        Subject::AccountBalance => Some(a.balance),
+        Subject::AccountNonce => Some(word_of(a.nonce)),
+        Subject::AccountCodeHash => Some(a.code_hash),
+        _ => None,
+    }
+}
+
+fn log_subject(log: &Log, s: Subject) -> Option<Root> {
+    match s {
+        Subject::LogEmitter => Some(address_word(&log.address)),
+        Subject::LogTopic(i) => log.topics.get(i as usize).copied(),
+        Subject::LogDataWord(i) => {
+            let start = i as usize * 32;
+            let word = log.data.get(start..start + 32)?;
+            let mut out = [0u8; 32];
+            out.copy_from_slice(word);
+            Some(out)
+        }
+        Subject::LogTopicCount => Some(word_of(log.topics.len() as u64)),
+        Subject::LogDataLength => Some(word_of(log.data.len() as u64)),
+        _ => None,
+    }
+}
+
+/// Checks one fact under `header` and returns its class, ID and a reader of
+/// its subjects.
+fn prove(header: &FinalisedHeader, proof: &Proof) -> Result<(Class, Root, Reader), Error> {
+    let chain_id = header.chain.chain_id;
+    match proof {
+        Proof::Account {
             address,
+            account: claimed,
             account_proof,
         } => {
-            let a = account(&record.state_root, address, account_proof)?;
-            (
-                Subject::Account { address: *address },
-                alloc::boxed::Box::new(move |f| match f {
-                    Field::Nonce => Ok(a.nonce),
-                    Field::Balance => Ok(a.balance),
-                    Field::StorageRoot => Ok(a.storage_root),
-                    Field::CodeHash => Ok(a.code_hash),
-                    _ => Err(Error::FieldMismatch),
-                }),
-            )
+            if account(&header.state_root, address, account_proof)? != *claimed {
+                return Err(Error::InvalidInclusionProof);
+            }
+            let id = fact_id(
+                chain_id,
+                2,
+                &[
+                    address,
+                    &claimed.nonce.to_be_bytes(),
+                    &claimed.balance,
+                    &claimed.code_hash,
+                ],
+            );
+            Ok((Class::State, id, Reader::Account(claimed.clone(), None)))
         }
-        Evidence::Storage {
+        Proof::Storage {
             address,
+            account: claimed,
             account_proof,
-            key,
+            slot,
+            value,
             storage_proof,
         } => {
-            let a = account(&record.state_root, address, account_proof)?;
-            let v = storage_value(&a.storage_root, key, storage_proof)?;
-            (
-                Subject::Storage {
-                    address: *address,
-                    key: *key,
-                },
-                alloc::boxed::Box::new(move |f| match f {
-                    Field::StorageValue => Ok(v),
-                    _ => Err(Error::FieldMismatch),
-                }),
-            )
+            if account(&header.state_root, address, account_proof)? != *claimed
+                || storage_value(&claimed.storage_root, slot, storage_proof)? != *value
+            {
+                return Err(Error::InvalidInclusionProof);
+            }
+            let id = fact_id(chain_id, 0, &[address, slot, value]);
+            Ok((
+                Class::State,
+                id,
+                Reader::Account(claimed.clone(), Some(*value)),
+            ))
         }
-        Evidence::ReceiptLog {
+        Proof::Log {
             tx_index,
-            receipt_proof,
+            receipt: claimed,
+            proof,
             log_index,
         } => {
             let mut key = Vec::new();
             tx_index.encode(&mut key);
-            let value = mpt::get(&record.receipts_root, &key, receipt_proof)?
-                .ok_or(Error::ReceiptAbsent)?;
-            let mut logs = receipt_logs(&value)?;
-            let i = *log_index as usize;
+            let value =
+                mpt::get(&header.receipts_root, &key, proof)?.ok_or(Error::ReceiptAbsent)?;
+            if value != *claimed {
+                return Err(Error::InvalidInclusionProof);
+            }
+            let (succeeded, mut logs) = receipt(&value)?;
+            if !succeeded {
+                return Err(Error::ConditionUnsatisfied);
+            }
+            let i = usize::try_from(*log_index).map_err(|_| Error::MalformedInput)?;
             if i >= logs.len() {
-                return Err(Error::OutOfRange);
+                return Err(Error::MalformedInput);
             }
             let log = logs.swap_remove(i);
-            (
-                Subject::Log {
-                    tx_index: *tx_index,
-                    log_index: *log_index,
-                },
-                alloc::boxed::Box::new(move |f| match f {
-                    Field::LogAddress => {
-                        let mut out = [0u8; 32];
-                        out[12..].copy_from_slice(&log.address);
-                        Ok(out)
-                    }
-                    Field::LogTopic(t) => {
-                        log.topics.get(t as usize).copied().ok_or(Error::OutOfRange)
-                    }
-                    Field::LogDataWord(w) => {
-                        let start = (w as usize).checked_mul(32).ok_or(Error::OutOfRange)?;
-                        let word = log.data.get(start..start + 32).ok_or(Error::OutOfRange)?;
-                        let mut out = [0u8; 32];
-                        out.copy_from_slice(word);
-                        Ok(out)
-                    }
-                    _ => Err(Error::FieldMismatch),
-                }),
-            )
-        }
-    };
-    for c in &claim.conditions {
-        if !compare(&read(c.field)?, c.op, &c.value) {
-            return Err(Error::ConditionFailed);
+            let topics: Vec<u8> = log.topics.iter().flatten().copied().collect();
+            let id = fact_id(
+                chain_id,
+                1,
+                &[
+                    &header.block_hash,
+                    &tx_index.to_be_bytes(),
+                    &log_index.to_be_bytes(),
+                    &log.address,
+                    &[log.topics.len() as u8],
+                    &topics,
+                    &(log.data.len() as u64).to_be_bytes(),
+                    &log.data,
+                ],
+            );
+            Ok((Class::Occurrence, id, Reader::Log(log)))
         }
     }
-    Ok(Attestation {
-        record: record.clone(),
-        subject,
-        conditions: claim.conditions.clone(),
+}
+
+/// The values one fact establishes.
+enum Reader {
+    /// An account, and the storage value when the fact is a storage fact.
+    Account(EthAccount, Option<Root>),
+    Log(Log),
+}
+
+impl Reader {
+    fn read(&self, s: Subject) -> Result<Root, Error> {
+        match (self, s) {
+            (Reader::Account(_, Some(v)), Subject::StorageValue { offset, width }) => {
+                packed(v, offset, width)
+            }
+            (Reader::Account(a, _), s) => account_subject(a, s).ok_or(Error::MalformedInput),
+            (Reader::Log(l), s) => log_subject(l, s).ok_or(Error::MalformedInput),
+        }
+    }
+}
+
+/// Checks `claim` against `header` and returns the statement it proves.
+///
+/// Rules: chain ids match ([`Error::ChainIdMismatch`]); at least one fact
+/// ([`Error::MalformedInput`]); each proof's claimed values equal what its
+/// trie proof shows ([`Error::InvalidInclusionProof`]): the account at
+/// `keccak256(address)` under the state root (absent reads as
+/// [`EthAccount::empty`]), the storage value at `keccak256(slot)` under the
+/// account's storage root (absent reads as zero), the receipt at
+/// `rlp(tx_index)` under the receipts root (absent fails); a log of a
+/// reverted transaction proves nothing ([`Error::ConditionUnsatisfied`]);
+/// every condition reads a subject its fact carries and holds.
+pub fn check_claim(header: &FinalisedHeader, claim: &Claim) -> Result<Statement, Error> {
+    if claim.chain_id != header.chain.chain_id {
+        return Err(Error::ChainIdMismatch);
+    }
+    if claim.facts.is_empty() {
+        return Err(Error::MalformedInput);
+    }
+    let mut facts = Vec::with_capacity(claim.facts.len());
+    for fact in &claim.facts {
+        let (class, id, reader) = prove(header, &fact.proof)?;
+        for c in &fact.conditions {
+            if !compare(&reader.read(c.subject)?, c.op, &c.rhs) {
+                return Err(Error::ConditionUnsatisfied);
+            }
+        }
+        facts.push(ProvenFact {
+            class,
+            id,
+            conditions: fact.conditions.clone(),
+        });
+    }
+    Ok(Statement {
+        instance: header.instance,
+        chain_id: header.chain.chain_id,
+        block_number: header.block_number,
+        facts,
     })
 }
 
@@ -384,7 +514,7 @@ mod tests {
         out
     }
 
-    fn receipt(logs: Vec<Vec<u8>>) -> Vec<u8> {
+    fn receipt_rlp(logs: Vec<Vec<u8>>) -> Vec<u8> {
         list(&[
             enc(&1u8),
             enc(&21_000u64),
@@ -405,27 +535,24 @@ mod tests {
 
     #[test]
     fn receipt_types() {
-        let body = receipt(alloc::vec![log(2, &[9; 64])]);
-        assert_eq!(receipt_logs(&body).unwrap().len(), 1);
+        let body = receipt_rlp(alloc::vec![log(2, &[9; 64])]);
+        assert_eq!(receipt(&body).unwrap().1.len(), 1);
         for t in 1u8..=4 {
             let mut typed = alloc::vec![t];
             typed.extend(&body);
-            assert_eq!(receipt_logs(&typed).unwrap()[0].topics.len(), 2);
+            assert_eq!(receipt(&typed).unwrap().1[0].topics.len(), 2);
         }
         for t in [0u8, 5, 0x7e, 0x80] {
             let mut typed = alloc::vec![t];
             typed.extend(&body);
             assert!(
-                matches!(receipt_logs(&typed), Err(Error::UnknownReceiptType)),
+                matches!(receipt(&typed), Err(Error::UnknownReceiptType)),
                 "{t}"
             );
         }
         let mut trailing = body.clone();
         trailing.push(0x80);
-        assert!(matches!(
-            receipt_logs(&trailing),
-            Err(Error::InvalidReceipt)
-        ));
+        assert!(matches!(receipt(&trailing), Err(Error::InvalidReceipt)));
         let five = list(&[
             enc(&1u8),
             enc(&21_000u64),
@@ -433,12 +560,9 @@ mod tests {
             list(&[]),
             enc(&0u8),
         ]);
-        assert!(matches!(receipt_logs(&five), Err(Error::InvalidReceipt)));
+        assert!(matches!(receipt(&five), Err(Error::InvalidReceipt)));
         let short_bloom = list(&[enc(&1u8), enc(&21_000u64), enc(&[0u8; 255][..]), list(&[])]);
-        assert!(matches!(
-            receipt_logs(&short_bloom),
-            Err(Error::InvalidReceipt)
-        ));
+        assert!(matches!(receipt(&short_bloom), Err(Error::InvalidReceipt)));
     }
 
     #[test]
@@ -457,9 +581,32 @@ mod tests {
         one[31] = 1;
         let mut big = [0u8; 32];
         big[0] = 1;
-        assert!(compare(&one, Op::Lt, &big));
-        assert!(compare(&big, Op::Ge, &one));
-        assert!(compare(&one, Op::Ne, &big));
-        assert!(!compare(&one, Op::Eq, &big));
+        assert!(compare(&one, Op::Less, &big));
+        assert!(compare(&big, Op::AtLeast, &one));
+        assert!(compare(&one, Op::NotEqual, &big));
+        assert!(!compare(&one, Op::Equal, &big));
+    }
+
+    #[test]
+    fn packed_fields() {
+        let mut v = [0u8; 32];
+        v[31] = 0xaa;
+        v[30] = 0xbb;
+        v[29] = 0xcc;
+        assert_eq!(packed(&v, 0, 1).unwrap()[31], 0xaa);
+        let two = packed(&v, 1, 2).unwrap();
+        assert_eq!(two[30..], [0xcc, 0xbb]);
+        assert_eq!(two[..30], [0; 30]);
+        assert_eq!(packed(&v, 0, 32).unwrap(), v);
+        assert_eq!(packed(&v, 1, 32), Err(Error::MalformedInput));
+        assert_eq!(packed(&v, 0, 0), Err(Error::MalformedInput));
+    }
+
+    #[test]
+    fn reverted_status_reads_as_failed() {
+        let ok = receipt_rlp(alloc::vec![]);
+        assert!(receipt(&ok).unwrap().0);
+        let failed = list(&[enc(&0u8), enc(&21_000u64), enc(&[0u8; 256][..]), list(&[])]);
+        assert!(!receipt(&failed).unwrap().0);
     }
 }

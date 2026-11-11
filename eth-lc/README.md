@@ -125,18 +125,19 @@ chain:
 
 ## Stalls and migration
 
-An instance stalls when a full sync committee period passes with zero
-qualifying updates. A stalled instance stays readable: claims against the
-headers it recorded keep working. Updates on it are refused.
+An instance stalls when `weak_subjectivity_period` seconds (an
+`InstanceConfig` field) pass after its finalized slot with zero qualifying
+updates. A stalled instance stays readable: claims against the headers it
+recorded keep working. Updates on it are refused. The constructors set 98,304
+s (256 epochs, one sync committee period on mainnet), the floor of the
+spec's weak-subjectivity period.
 
-The stall time (`stale_after_ms`, the start of period P+2 for a store
-finalized in P) is also the expiry of committee keys. Sync-committee
-signatures are not slashable, and `signature_slot` is outside the signed
-message. So a committee's keys can sign an update for the store until the
-window closes. With this bound, P's committee stays usable through P+1, one
-period after its duty ends. A later bound keeps finished committees' keys
-usable for longer. Within the window, a store that missed updates catches up
-with one historical update per period (Beacon API
+The stall time (`stale_after_ms`) is also the expiry of committee keys.
+Sync-committee signatures are not slashable, and `signature_slot` is outside
+the signed message. So a committee's keys can sign an update for the store
+until the window closes. A longer `weak_subjectivity_period` keeps finished
+committees' keys usable for longer. Within the window, a store that missed
+updates catches up with one historical update per period (Beacon API
 `/eth/v1/beacon/light_client/updates`).
 
 Detect:
@@ -167,7 +168,7 @@ claim. "Liveness" means the participant can only delay progress.
 
 | Participant | Role | Affects | Why |
 |---|---|---|---|
-| Ethereum sync committee | Signs the headers that updates carry | Safety | The trust assumption of the protocol: at least 1/3 of each 512-member committee is honest. The core requires 2/3 participation. |
+| Ethereum sync committee | Signs the headers that updates carry | Safety | The trust assumption of the protocol: at least 1/3 of each 512-member committee is honest. The core requires `min_participants` signers, as `Init` sets it: the constructors set 342, and the core accepts any value from 1 to 512. |
 | Instance deployer | Sends `Init` with the chain config and the checkpoint | Safety, for that instance only | The trust anchor. Anyone can repeat `verify_instance_config` and `verify_new_checkpoint` on the stored config and checkpoint. A consumer chooses which instance to read. |
 | Beacon API endpoint | Serves bootstraps, updates and the chain spec | Liveness | The core checks every update by Merkle branches and the committee signature. Any beacon node serves this data, so a user can run one. |
 | Execution RPC endpoint | Serves block headers, receipts and MPT proofs | Liveness | The core checks each item by Keccak-256 against an anchored root. Any execution node serves this data. |
@@ -211,10 +212,12 @@ its own config, checkpoint and store. `Update` names its target instance, and
 update built for one instance is refused by every other instance
 (`just e1b-instances` in `rfp-021/e1`).
 
-A `HeaderRecord` binds `chain_id`, so a record matches claims on its own
-chain only. Two instances on the same chain can produce equal records. A
-consumer binds to an instance by its account id: it reads that
-account, or accepts an attestation only from that sender.
+A `FinalisedHeader` binds its instance id and its `ChainBinding`, and a
+`Statement` carries both the instance and `chain_id`. A claim matches headers
+of its own chain only. A consumer binds to an instance by its id: it reads
+that instance's header accounts, or accepts a statement only when its
+`instance` is that id. Fact IDs leave out the instance, so a fact proven
+through an instance and through its replacement has one ID.
 
 ## Tests
 

@@ -46,11 +46,51 @@ fn recorded_chain_syncs_through_four_periods_and_a_finality_update() {
 }
 
 // ---------------------------------------------------------------------------
-// Claims against the record of a light-client-verified block.
+// The instance accounts (proposal section 4), written through `init` and `advance`.
 
-use eth_lc_core::claim::{
-    check_claim, Claim, Condition, Evidence, Field, HeaderRecord, Op, Subject,
-};
+use eth_lc_core::instance::{self, AccountId, FinalisedHeader};
+
+/// A stand-in for the LEZ PDA: the seed itself.
+fn pda(seed: &[u8; 32]) -> AccountId {
+    *seed
+}
+
+#[test]
+fn instance_refuses_a_foreign_checkpoint_or_state() {
+    let dir = chain();
+    let mut config = dir.cfg.instance_config(dir.bootstrap.trusted_block_root);
+    config.checkpoint[0] ^= 1;
+    assert_eq!(
+        instance::init(&config, &dir.bootstrap, pda).err(),
+        Some(Error::CheckpointRootMismatch)
+    );
+    config.checkpoint[0] ^= 1;
+    let first = instance::init(&config, &dir.bootstrap, pda).unwrap();
+    let store = initialize_store(&dir.cfg, &dir.bootstrap).unwrap();
+    let input = dir.update_input(&store, &dir.updates[0]).unwrap();
+    let mut other = config.clone();
+    other.finality.min_participants = 400;
+    assert_eq!(
+        instance::advance(&other, &first.state, &first.header, &input, pda).err(),
+        Some(Error::AccountMismatch)
+    );
+    let mut header = first.header.clone();
+    header.block_number += 1;
+    assert_eq!(
+        instance::advance(&config, &first.state, &header, &input, pda).err(),
+        Some(Error::AccountMismatch)
+    );
+    // Step 0 reaches no new block: `advance` refuses it.
+    assert_eq!(
+        instance::advance(&config, &first.state, &first.header, &input, pda).err(),
+        Some(Error::NoProgress)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Claims against the header of a light-client-verified block.
+
+use eth_lc_core::claim::{check_claim, Claim, Class, Condition, Fact, Op, Proof, Subject};
 use eth_lc_core::crypto::keccak256;
 use eth_lc_core::Error;
 use eth_lc_host::evidence::{account_from_get_proof, hex_bytes, storage_from_proof_value};
@@ -65,10 +105,11 @@ fn evidence_json(name: &str) -> Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
-/// Record of the evidence block: replay the chain-dir, then apply the
+/// Header of the evidence block: replay the chain-dir, then apply the
 /// finality update recorded with the evidence.
-fn anchored_record() -> HeaderRecord {
+fn anchored_header() -> FinalisedHeader {
     let dir = chain();
+    let config = dir.cfg.instance_config(dir.bootstrap.trusted_block_root);
     let (before, _) = replay(&dir);
     let meta = evidence_json("finality-update.json");
     let bytes = std::fs::read(format!(
@@ -81,17 +122,37 @@ fn anchored_record() -> HeaderRecord {
     let update = forks::to_core_update(&dir.cfg, &raw).unwrap();
     let store = &before[4];
     let next = apply_update(&dir.cfg, store, &dir.update_input(store, &update).unwrap()).unwrap();
-    let record = HeaderRecord::from_store(&dir.cfg, &next);
+    let period = dir.cfg.period_at_slot(next.finalized.slot);
+    let header = FinalisedHeader::from_store(&config, pda(&config.seed()), &next, 0, period);
     let block = evidence_json("block.json");
     assert_eq!(
-        format!("0x{}", hex::encode(record.block_hash)),
+        format!("0x{}", hex::encode(header.block_hash)),
         block["hash"].as_str().unwrap()
     );
     assert_eq!(
-        format!("0x{}", hex::encode(record.state_root)),
+        format!("0x{}", hex::encode(header.state_root)),
         block["stateRoot"].as_str().unwrap()
     );
-    record
+    header
+}
+
+/// A header with only `receipts_root` set, for receipts outside the recorded chain.
+fn receipts_header(receipts_root: [u8; 32]) -> FinalisedHeader {
+    FinalisedHeader {
+        instance: [0; 32],
+        chain: instance::ChainBinding {
+            chain_id: 1,
+            genesis_validators_root: [0; 32],
+        },
+        slot: 0,
+        beacon_root: [0; 32],
+        block_number: 0,
+        block_hash: [0; 32],
+        state_root: [0; 32],
+        receipts_root,
+        signers: 0,
+        committee_period: 0,
+    }
 }
 
 fn word(v: &Value) -> [u8; 32] {
@@ -114,193 +175,287 @@ fn quantity_word(v: &Value) -> [u8; 32] {
     out
 }
 
-fn cond(field: Field, op: Op, value: [u8; 32]) -> Condition {
-    Condition { field, op, value }
+fn cond(subject: Subject, op: Op, rhs: [u8; 32]) -> Condition {
+    Condition { subject, op, rhs }
+}
+
+fn claim_of(proof: Proof, conditions: Vec<Condition>) -> Claim {
+    Claim {
+        chain_id: 1,
+        facts: vec![Fact { proof, conditions }],
+    }
 }
 
 #[test]
 fn account_and_storage_claims() {
-    let record = anchored_record();
+    let header = anchored_header();
     let weth = evidence_json("weth-proof.json");
     // Existing account.
-    let claim = Claim {
-        chain_id: 1,
-        evidence: account_from_get_proof(&weth).unwrap(),
-        conditions: vec![
-            cond(Field::Balance, Op::Eq, quantity_word(&weth["balance"])),
-            cond(Field::Nonce, Op::Eq, quantity_word(&weth["nonce"])),
-            cond(Field::CodeHash, Op::Eq, word(&weth["codeHash"])),
-            cond(Field::StorageRoot, Op::Eq, word(&weth["storageHash"])),
-            cond(Field::Balance, Op::Gt, [0; 32]),
+    let claim = claim_of(
+        account_from_get_proof(&weth).unwrap(),
+        vec![
+            cond(
+                Subject::AccountBalance,
+                Op::Equal,
+                quantity_word(&weth["balance"]),
+            ),
+            cond(
+                Subject::AccountNonce,
+                Op::Equal,
+                quantity_word(&weth["nonce"]),
+            ),
+            cond(Subject::AccountCodeHash, Op::Equal, word(&weth["codeHash"])),
+            cond(Subject::AccountBalance, Op::Greater, [0; 32]),
         ],
-    };
-    let a = check_claim(&record, &claim).unwrap();
-    assert!(matches!(a.subject, Subject::Account { .. }));
-    // Nonzero WETH slot (slot 0, the name).
-    let slot = Claim {
-        chain_id: 1,
-        evidence: storage_from_proof_value(&weth, 0).unwrap(),
-        conditions: vec![cond(
-            Field::StorageValue,
-            Op::Eq,
-            quantity_word(&weth["storageProof"][0]["value"]),
-        )],
-    };
-    check_claim(&record, &slot).unwrap();
+    );
+    let s = check_claim(&header, &claim).unwrap();
+    assert_eq!(s.chain_id, 1);
+    assert_eq!(s.block_number, header.block_number);
+    assert_eq!(s.facts[0].class, Class::State);
+    // Nonzero WETH slot (slot 0, the name), whole and as packed fields.
+    let value = quantity_word(&weth["storageProof"][0]["value"]);
+    let slot = claim_of(
+        storage_from_proof_value(&weth, 0).unwrap(),
+        vec![
+            cond(
+                Subject::StorageValue {
+                    offset: 0,
+                    width: 32,
+                },
+                Op::Equal,
+                value,
+            ),
+            cond(Subject::AccountBalance, Op::Greater, [0; 32]),
+        ],
+    );
+    let slot_statement = check_claim(&header, &slot).unwrap();
+    let mut low = [0u8; 32];
+    low[31] = value[31];
+    check_claim(
+        &header,
+        &claim_of(
+            storage_from_proof_value(&weth, 0).unwrap(),
+            vec![cond(
+                Subject::StorageValue {
+                    offset: 0,
+                    width: 1,
+                },
+                Op::Equal,
+                low,
+            )],
+        ),
+    )
+    .unwrap();
     // Absent slot reads zero.
-    let absent_slot = Claim {
+    let absent_slot = claim_of(
+        storage_from_proof_value(&weth, 1).unwrap(),
+        vec![cond(
+            Subject::StorageValue {
+                offset: 0,
+                width: 32,
+            },
+            Op::Equal,
+            [0; 32],
+        )],
+    );
+    check_claim(&header, &absent_slot).unwrap();
+    // Two facts under one header: one statement, one ID each, in order.
+    let compound = Claim {
         chain_id: 1,
-        evidence: storage_from_proof_value(&weth, 1).unwrap(),
-        conditions: vec![cond(Field::StorageValue, Op::Eq, [0; 32])],
+        facts: vec![slot.facts[0].clone(), absent_slot.facts[0].clone()],
     };
-    check_claim(&record, &absent_slot).unwrap();
+    let both = check_claim(&header, &compound).unwrap();
+    assert_eq!(both.facts.len(), 2);
+    assert_eq!(both.facts[0].id, slot_statement.facts[0].id);
+    assert_ne!(both.facts[0].id, both.facts[1].id);
     // Absent account reads as nonce 0, balance 0, empty code.
     let absent = evidence_json("absent-account-proof.json");
-    let claim = Claim {
-        chain_id: 1,
-        evidence: account_from_get_proof(&absent).unwrap(),
-        conditions: vec![
-            cond(Field::Nonce, Op::Eq, [0; 32]),
-            cond(Field::Balance, Op::Eq, [0; 32]),
-            cond(Field::CodeHash, Op::Eq, keccak256(&[])),
-            cond(
-                Field::StorageRoot,
-                Op::Eq,
-                eth_lc_core::mpt::EMPTY_TRIE_ROOT,
-            ),
+    let claim = claim_of(
+        account_from_get_proof(&absent).unwrap(),
+        vec![
+            cond(Subject::AccountNonce, Op::Equal, [0; 32]),
+            cond(Subject::AccountBalance, Op::Equal, [0; 32]),
+            cond(Subject::AccountCodeHash, Op::Equal, keccak256(&[])),
         ],
-    };
-    check_claim(&record, &claim).unwrap();
+    );
+    check_claim(&header, &claim).unwrap();
 
     // Mutations.
-    let fails = |c: &Claim, e: Error| assert_eq!(check_claim(&record, c).err(), Some(e));
+    let fails = |c: &Claim, e: Error| assert_eq!(check_claim(&header, c).err(), Some(e));
+    let storage = |c: &mut Claim, f: &dyn Fn(&mut Proof)| f(&mut c.facts[0].proof);
     let mut m = slot.clone();
-    if let Evidence::Storage { storage_proof, .. } = &mut m.evidence {
-        storage_proof[0][3] ^= 1;
-    }
+    storage(&mut m, &|p| {
+        if let Proof::Storage { storage_proof, .. } = p {
+            storage_proof[0][3] ^= 1;
+        }
+    });
     fails(&m, Error::InvalidProof);
     let mut m = slot.clone();
-    if let Evidence::Storage { key, .. } = &mut m.evidence {
-        key[31] = 9;
-    }
+    storage(&mut m, &|p| {
+        if let Proof::Storage { slot, .. } = p {
+            slot[31] = 9;
+        }
+    });
     fails(&m, Error::InvalidProof);
     let mut m = slot.clone();
-    if let Evidence::Storage { storage_proof, .. } = &mut m.evidence {
-        storage_proof.clear();
-    }
-    fails(&m, Error::InvalidProof);
+    storage(&mut m, &|p| {
+        if let Proof::Storage { value, .. } = p {
+            value[31] ^= 1;
+        }
+    });
+    fails(&m, Error::InvalidInclusionProof);
+    let mut m = slot.clone();
+    storage(&mut m, &|p| {
+        if let Proof::Storage { account, .. } = p {
+            account.nonce += 1;
+        }
+    });
+    fails(&m, Error::InvalidInclusionProof);
     let mut m = slot.clone();
     m.chain_id = 5;
     fails(&m, Error::ChainIdMismatch);
     let mut m = slot.clone();
-    m.conditions = vec![cond(Field::Balance, Op::Eq, [0; 32])];
-    fails(&m, Error::FieldMismatch);
+    m.facts.clear();
+    fails(&m, Error::MalformedInput);
     let mut m = slot.clone();
-    m.conditions = vec![cond(Field::StorageValue, Op::Eq, [0; 32])];
-    fails(&m, Error::ConditionFailed);
+    m.facts[0].conditions = vec![cond(Subject::LogEmitter, Op::Equal, [0; 32])];
+    fails(&m, Error::MalformedInput);
+    let mut m = slot.clone();
+    m.facts[0].conditions = vec![cond(
+        Subject::StorageValue {
+            offset: 31,
+            width: 2,
+        },
+        Op::Equal,
+        [0; 32],
+    )];
+    fails(&m, Error::MalformedInput);
+    let mut m = slot.clone();
+    m.facts[0].conditions = vec![cond(
+        Subject::StorageValue {
+            offset: 0,
+            width: 32,
+        },
+        Op::Equal,
+        [0; 32],
+    )];
+    fails(&m, Error::ConditionUnsatisfied);
+    let mut m = claim.clone();
+    m.facts[0].conditions = vec![cond(
+        Subject::StorageValue {
+            offset: 0,
+            width: 32,
+        },
+        Op::Equal,
+        [0; 32],
+    )];
+    fails(&m, Error::MalformedInput);
 }
 
 /// Checks the log claims of a recorded receipt against its JSON, under a
-/// record built from the receipt's block header.
-fn check_receipt_file(name: &str, record: Option<&HeaderRecord>) {
+/// header built from the receipt's block header.
+fn check_receipt_file(name: &str, header: Option<&FinalisedHeader>) {
     let r = evidence_json(name);
     let receipts_root = word(&r["block"]["receiptsRoot"]);
     let own;
-    let record = match record {
-        Some(rec) => {
-            assert_eq!(rec.receipts_root, receipts_root);
-            rec
+    let header = match header {
+        Some(h) => {
+            assert_eq!(h.receipts_root, receipts_root);
+            h
         }
         None => {
-            own = HeaderRecord {
-                chain_id: 1,
-                slot: 0,
-                beacon_root: [0; 32],
-                block_number: 0,
-                block_hash: [0; 32],
-                state_root: [0; 32],
-                receipts_root,
-            };
+            own = receipts_header(receipts_root);
             &own
         }
     };
     let tx_index = r["tx_index"].as_u64().unwrap();
-    let log_index = r["log_index"].as_u64().unwrap() as u32;
+    let log_index = r["log_index"].as_u64().unwrap();
     let proof: Vec<Vec<u8>> = r["receipt_proof"]
         .as_array()
         .unwrap()
         .iter()
         .map(|n| hex_bytes(n).unwrap())
         .collect();
+    let receipt = eth_lc_host::evidence::receipt_encoding(&r["receipt"]).unwrap();
     let log = &r["receipt"]["logs"][log_index as usize];
     let data = hex_bytes(&log["data"]).unwrap();
-    let mut conditions = vec![cond(Field::LogAddress, Op::Eq, word(&log["address"]))];
-    for (i, t) in log["topics"].as_array().unwrap().iter().enumerate() {
-        conditions.push(cond(Field::LogTopic(i as u8), Op::Eq, word(t)));
+    let topics = log["topics"].as_array().unwrap();
+    let count = |n: usize| {
+        let mut w = [0u8; 32];
+        w[24..].copy_from_slice(&(n as u64).to_be_bytes());
+        w
+    };
+    let mut conditions = vec![
+        cond(Subject::LogEmitter, Op::Equal, word(&log["address"])),
+        cond(Subject::LogTopicCount, Op::Equal, count(topics.len())),
+        cond(Subject::LogDataLength, Op::Equal, count(data.len())),
+    ];
+    for (i, t) in topics.iter().enumerate() {
+        conditions.push(cond(Subject::LogTopic(i as u8), Op::Equal, word(t)));
     }
-    for (i, w) in data.chunks_exact(32).enumerate() {
+    for (i, w) in data.chunks_exact(32).enumerate().take(256) {
         conditions.push(cond(
-            Field::LogDataWord(i as u32),
-            Op::Eq,
+            Subject::LogDataWord(i as u8),
+            Op::Equal,
             w.try_into().unwrap(),
         ));
     }
-    let claim = Claim {
-        chain_id: 1,
-        evidence: Evidence::ReceiptLog {
+    let claim = claim_of(
+        Proof::Log {
             tx_index,
-            receipt_proof: proof,
+            receipt,
+            proof,
             log_index,
         },
         conditions,
-    };
-    let a = check_claim(record, &claim).unwrap();
-    assert_eq!(
-        a.subject,
-        Subject::Log {
-            tx_index,
-            log_index
-        }
     );
+    let s = check_claim(header, &claim).unwrap();
+    assert_eq!(s.facts[0].class, Class::Occurrence);
     println!(
         "{name}: type {} tx {tx_index} log {log_index}: {} conditions hold",
         r["receipt"]["type"],
-        claim.conditions.len()
+        claim.facts[0].conditions.len()
     );
 
     // Mutations on this receipt.
-    let fails = |c: &Claim, e: Error| assert_eq!(check_claim(record, c).err(), Some(e), "{name}");
+    let fails = |c: &Claim, e: Error| assert_eq!(check_claim(header, c).err(), Some(e), "{name}");
     let mut m = claim.clone();
-    if let Evidence::ReceiptLog { log_index, .. } = &mut m.evidence {
-        *log_index = r["receipt"]["logs"].as_array().unwrap().len() as u32;
+    if let Proof::Log { log_index, .. } = &mut m.facts[0].proof {
+        *log_index = r["receipt"]["logs"].as_array().unwrap().len() as u64;
     }
-    fails(&m, Error::OutOfRange);
+    fails(&m, Error::MalformedInput);
     let mut m = claim.clone();
-    m.conditions = vec![cond(
-        Field::LogDataWord((data.len() / 32) as u32),
-        Op::Eq,
+    if let Proof::Log { receipt, .. } = &mut m.facts[0].proof {
+        let last = receipt.len() - 1;
+        receipt[last] ^= 1;
+    }
+    fails(&m, Error::InvalidInclusionProof);
+    let mut m = claim.clone();
+    m.facts[0].conditions = vec![cond(
+        Subject::LogDataWord((data.len() / 32) as u8),
+        Op::Equal,
         [0; 32],
     )];
-    fails(&m, Error::OutOfRange);
+    fails(&m, Error::MalformedInput);
     let mut m = claim.clone();
-    m.conditions = vec![cond(
-        Field::LogTopic(log["topics"].as_array().unwrap().len() as u8),
-        Op::Eq,
+    m.facts[0].conditions = vec![cond(
+        Subject::LogTopic(topics.len() as u8),
+        Op::Equal,
         [0; 32],
     )];
-    fails(&m, Error::OutOfRange);
+    fails(&m, Error::MalformedInput);
     let mut m = claim.clone();
-    m.conditions = vec![cond(Field::Nonce, Op::Eq, [0; 32])];
-    fails(&m, Error::FieldMismatch);
+    m.facts[0].conditions = vec![cond(Subject::AccountNonce, Op::Equal, [0; 32])];
+    fails(&m, Error::MalformedInput);
     let mut m = claim.clone();
-    m.conditions[0].op = Op::Ne;
-    fails(&m, Error::ConditionFailed);
+    m.facts[0].conditions[0].op = Op::NotEqual;
+    fails(&m, Error::ConditionUnsatisfied);
 }
 
 #[test]
 fn receipt_claims_for_index_zero_and_each_type() {
-    let record = anchored_record();
-    check_receipt_file("receipt-index0.json", Some(&record));
+    let header = anchored_header();
+    check_receipt_file("receipt-index0.json", Some(&header));
     for t in [0, 2, 3, 4] {
         check_receipt_file(&format!("receipt-type-{t}.json"), None);
     }
@@ -326,25 +481,16 @@ fn crafted_receipts_fail() {
             .into_iter()
             .map(|(_, n)| n.to_vec())
             .collect();
-        let record = HeaderRecord {
-            chain_id: 1,
-            slot: 0,
-            beacon_root: [0; 32],
-            block_number: 0,
-            block_hash: [0; 32],
-            state_root: [0; 32],
-            receipts_root: root.0,
-        };
-        let claim = Claim {
-            chain_id: 1,
-            evidence: Evidence::ReceiptLog {
+        let claim = claim_of(
+            Proof::Log {
                 tx_index,
-                receipt_proof: proof,
+                receipt: value,
+                proof,
                 log_index: 0,
             },
-            conditions: vec![],
-        };
-        check_claim(&record, &claim).err()
+            vec![],
+        );
+        check_claim(&receipts_header(root.0), &claim).err()
     };
     assert_eq!(run(encoded.clone(), 0), None);
     let mut unknown = encoded.clone();
@@ -353,6 +499,11 @@ fn crafted_receipts_fail() {
     let mut trailing = encoded.clone();
     trailing.push(0x80);
     assert_eq!(run(trailing, 0), Some(Error::InvalidReceipt));
+    // A reverted transaction's receipt proves no log.
+    let mut reverted_json = base.clone();
+    reverted_json["status"] = Value::String("0x0".into());
+    let reverted = eth_lc_host::evidence::receipt_encoding(&reverted_json).unwrap();
+    assert_eq!(run(reverted, 0), Some(Error::ConditionUnsatisfied));
     // Index 1 is absent from a one-receipt trie.
     assert_eq!(run(encoded, 1), Some(Error::ReceiptAbsent));
 }

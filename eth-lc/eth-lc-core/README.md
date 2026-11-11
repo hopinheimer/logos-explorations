@@ -13,15 +13,18 @@ that form.
 
 | Item | Use |
 |---|---|
-| `ChainConfig`, `check_profile` | Chain parameters. The preset is pinned (mainnet preset); the chain identity comes from `Init` and passes structural checks. |
+| `InstanceConfig` (`ChainBinding`, `FinalityParams`) | The instance configuration (proposal 4.1): checkpoint, chain identity, fork schedule, `min_participants`, `weak_subjectivity_period`. |
+| `ConsensusState`, `Committee`, `FinalisedHeader`, `Event` | The program's accounts and events (proposal 4.2 to 4.4, 4.8). Each is written once. |
+| `instance::{init, advance}` | The transitions that write those accounts. Seeds: `InstanceConfig::seed`, `instance::{state_seed, committee_seed, header_seed}`. |
+| `ChainConfig`, `check_profile` | The parameters the sync rules read: an `InstanceConfig` with the pinned preset (`ChainConfig::from_instance`). Never stored. The chain identity and finality parameters pass structural checks. |
 | `ChainConfig::mainnet()`, `sepolia()`, `hoodi()` | Constructors with each chain's values, cross-checked against recorded Beacon API responses. They are conveniences: any chain of the pinned preset passes the same checks. |
 | `initialize_store(cfg, &BootstrapInput)` | `initialize_light_client_store` plus the config check and the execution anchor. The only way to anchor a store. |
 | `apply_update(cfg, &store, &UpdateInput)` | Guest entry: one strict store transition. |
 | `get_lc_execution_root(cfg, &header)` | The spec's execution root of a header, at the fork of its own slot. |
 | `validate_light_client_update(..., current_slot)` | The full spec check, read-only. For parity tests and off-chain callers. |
 | `stale_after_ms(cfg, &store)` | End of the update window: the time at which the store stalls and its committees' keys expire. |
-| `claim::check_claim(&record, &claim)` | Checks account, storage and receipt-log claims against a `HeaderRecord`. |
-| `claim::HeaderRecord::from_store(cfg, &store)` | The record of the store's finalized header. |
+| `claim::check_claim(&header, &claim)` | Checks a `Claim` (facts, each a `Proof` and `Condition`s) against a `FinalisedHeader` and returns the `Statement` (proposal 4.5 to 4.7). |
+| `FinalisedHeader::from_store(config, instance, &store, signers, period)` | The header account of a store's finalized header. |
 
 Inputs carry the full signing committee and `KeyHints` (uncompressed keys of
 the committee aggregate and of each non-signer). `eth-lc-host` builds them.
@@ -62,47 +65,55 @@ the committee aggregate and of each non-signer). `eth-lc-host` builds them.
 
 `Init` anchors an empty instance. `Update` runs on a private actor of the
 program and sends `Advance` to the public instance. `Attest` checks a claim
-against the instance record and emits the attestation.
+against the instance's finalised header and emits the statement. This
+example keeps one instance account holding `(InstanceConfig, Store)`; the
+proposal's account layout (state, committee and header PDAs) is
+`eth_lc_core::instance::{init, advance}`.
 
 ```rust
 use borsh::{BorshDeserialize, BorshSerialize};
-use eth_lc_core::claim::{check_claim, Claim, HeaderRecord};
-use eth_lc_core::{apply_update, initialize_store, stale_after_ms, BootstrapInput, ChainConfig, Store, UpdateInput};
+use eth_lc_core::claim::{check_claim, Claim};
+use eth_lc_core::{
+    apply_update, initialize_store, stale_after_ms, BootstrapInput, ChainConfig, Event, FinalisedHeader,
+    InstanceConfig, Store, UpdateInput,
+};
 use lee_core::account::Actor;
 use lee_core::program::{ProgramEvent, ReceiveInput, Response};
 
 #[derive(BorshSerialize, BorshDeserialize)]
 pub enum LcMsg {
     /// Instance actor: anchors an empty instance. The instance must authorize it.
-    Init { cfg: ChainConfig, input: BootstrapInput },
+    Init { config: InstanceConfig, input: BootstrapInput },
     /// Private actor: `input` is the instance state followed by `borsh(UpdateInput)`.
     Update { instance: Actor, input: Vec<u8> },
     /// Instance actor: replaces its state, only from this program and only on top of `prev`.
     Advance { prev: Vec<u8>, next: Vec<u8> },
-    /// Instance actor: checks `claim` against the finalized record and emits the attestation.
+    /// Instance actor: checks `claim` against the finalised header and emits the statement.
     Attest { claim: Claim },
 }
 
-/// Event selector: the first 8 bytes of `sha256("eth-lc::Attestation")`.
-pub const ATTESTATION: [u8; 8] = [0xa2, 0xbb, 0xb2, 0xad, 0xb0, 0x67, 0xee, 0xcc];
+/// Event selector: the first 8 bytes of `sha256("eth-lc::Event")`.
+pub const EVENT: [u8; 8] = [0x67, 0xa6, 0x3c, 0xa3, 0x1e, 0x9d, 0xfc, 0xbc];
 
 // A panic aborts the guest, which refuses the message: the `expect` calls are the refusal paths.
 fn handle(input: &ReceiveInput) -> Response {
     match borsh::from_slice::<LcMsg>(&input.message).expect("lc message") {
-        LcMsg::Init { cfg, input: bootstrap } => {
+        LcMsg::Init { config, input: bootstrap } => {
             assert!(input.is_authorized, "init must be authorized");
             assert!(input.pre_state.as_ref().is_empty(), "instance already anchored");
-            let store = initialize_store(&cfg, &bootstrap).expect("bootstrap verifies");
-            Response::set_state(borsh::to_vec(&(cfg, store)).expect("state encodes"))
+            assert_eq!(config.checkpoint, bootstrap.trusted_block_root, "checkpoint");
+            let store = initialize_store(&ChainConfig::from_instance(&config), &bootstrap).expect("bootstrap verifies");
+            Response::set_state(borsh::to_vec(&(config, store)).expect("state encodes"))
         }
         LcMsg::Update { instance, input } => {
             let mut rest = input.as_slice();
-            let (cfg, store) = <(ChainConfig, Store)>::deserialize(&mut rest).expect("instance state");
+            let (config, store) = <(InstanceConfig, Store)>::deserialize(&mut rest).expect("instance state");
             let prev = input[..input.len() - rest.len()].to_vec();
             let update: UpdateInput = borsh::from_slice(rest).expect("update input");
+            let cfg = ChainConfig::from_instance(&config);
             let next_store = apply_update(&cfg, &store, &update).expect("the update verifies");
-            let next = borsh::to_vec(&(&cfg, &next_store)).expect("state encodes");
-            let cfg_len = borsh::to_vec(&cfg).expect("config encodes").len();
+            let next = borsh::to_vec(&(&config, &next_store)).expect("state encodes");
+            let cfg_len = borsh::to_vec(&config).expect("config encodes").len();
             assert_eq!(next[..cfg_len], prev[..cfg_len], "config changed");
             Response::keep_state()
                 .send_sync(instance, &LcMsg::Advance { prev, next })
@@ -114,10 +125,16 @@ fn handle(input: &ReceiveInput) -> Response {
             Response::set_state(next)
         }
         LcMsg::Attest { claim } => {
-            let (cfg, store): (ChainConfig, Store) = borsh::from_slice(input.pre_state.as_ref()).expect("instance state");
-            let attestation = check_claim(&HeaderRecord::from_store(&cfg, &store), &claim).expect("claim holds");
-            Response::keep_state()
-                .event(ProgramEvent { selector: ATTESTATION, data: borsh::to_vec(&attestation).expect("attestation encodes") })
+            let (config, store): (InstanceConfig, Store) = borsh::from_slice(input.pre_state.as_ref()).expect("instance state");
+            let instance: [u8; 32] = input.receiver.account_id.as_ref().try_into().expect("32-byte id");
+            let period = ChainConfig::from_instance(&config).period_at_slot(store.finalized.slot);
+            // This one-account example keeps no signer count: it records 0.
+            let header = FinalisedHeader::from_store(&config, instance, &store, 0, period);
+            let statement = check_claim(&header, &claim).expect("claim holds");
+            Response::keep_state().event(ProgramEvent {
+                selector: EVENT,
+                data: borsh::to_vec(&Event::Attested { statement }).expect("event encodes"),
+            })
         }
     }
 }
@@ -147,9 +164,20 @@ Notes:
 - Receipt types: legacy, `0x01`, `0x02`, `0x03`, `0x04`. Other type bytes fail
   with `Error::UnknownReceiptType`. A later receipt type gets support after its
   EIP text is checked.
-- `Attestation` is plain data. It is a result for the program that ran
+- A `Proof` carries the values it proves (the account, the storage value, the
+  receipt). Each must equal what its trie proof shows
+  (`Error::InvalidInclusionProof`).
+- A condition reads a subject its fact carries. Any other subject, an absent
+  topic or data word, and a packed field past 32 bytes fail with
+  `Error::MalformedInput`. Comparisons are unsigned big-endian.
+- A log of a reverted transaction fails with `Error::ConditionUnsatisfied`.
+- Fact IDs: `SHA-256("eth_lc/statement/v1" ‖ chain_id ‖ kind ‖ fields)`,
+  integers big-endian (`chain_id`, indices, `nonce`, `len(data)` as 8 bytes;
+  `kind`, `n_topics` as 1 byte). Storage and account facts are `Class::State`,
+  logs are `Class::Occurrence`.
+- A `Statement` is plain data. It is a result for the program that ran
   `check_claim`. A consumer that needs authentication re-checks the claim
-  against a store or record it holds itself.
+  against a header it holds itself.
 
 ## Stalls and migration
 
