@@ -41,8 +41,8 @@ The program pins the mainnet preset and takes the chain identity from `Init`, so
 | E1b, dev | **real mainnet update** with committee handoff (period 1902 to 1903, step 1) | settles; private **14,058,921** cycles, public part **19,959** cycles; input 52,218 B stays off chain |
 | E1b, dev | guest wire and `Update` window, step 1 (`just e1b-window`) | settles at `stale_after_ms - 1`; refused at `stale_after_ms`; one trailing input byte refused. The README guest example (`just consumer-check` in `eth-lc`) passes the same cases, and its `Attest` leaves the timestamp window open |
 | E1b, dev | two instances under one program, steps 1 and 2 (`just e1b-instances`) | an update advances only its own instance; step 1's input sent to the other instance is refused, and neither instance moves |
-| E1b, **real proof** | the same real update | settles with a verified receipt; **1,079 s** CPU, **12.2 GB** peak, transaction **228,299 B** |
-| E1b, dev | the same real update **executed directly** (what a sequencer would run on the public path) | **260 ms** mean of 5. For scale: LEZ's fee model prices verifying a private-transaction receipt at about 12 ms (`PRIVATE_VERIFY_GAS`, M2 Pro calibration) |
+| E1b, **real proof** | the same real update | settles with a verified receipt; **1,107 s** CPU, **13.1 GB** peak, transaction **228,355 B** |
+| E1b, dev | the same real update **executed directly** (what a sequencer would run on the public path) | **255 ms** mean of 5. For scale: LEZ's fee model prices verifying a private-transaction receipt at about 12 ms (`PRIVATE_VERIFY_GAS`, M2 Pro calibration) |
 | E1c, dev | toy update through the block fee path (`settle_transaction`) | exec gas **419,311** = 409,764 flat + 9,547; storage gas **224,063**; **4.19%** of a block's exec, **22.4%** of its storage; base fee 5,146,992 at the floor price |
 | E1c, dev | two operators race the same update | loser lands as a **charged revert**: 5,470,616 (its full reserve), store unchanged |
 | E1c, **real proofs** | both E1c cases, tiny private burn | identical gas and fees with real receipts; 3 proofs in 699 s (**about 233 s per private transaction** of fixed circuit overhead) |
@@ -55,13 +55,13 @@ The program pins the mainnet preset and takes the chain identity from `Init`, so
 | Storage gas per update | update material, about 52 KB | 224,063 (the receipt) |
 | Base fee at floor prices | about 101M | about 5.1M (**about 20x less**) |
 | Job state across transactions | yes | none |
-| Submitter hardware | LEZ gas only | a prover: **1,079 s, 12.2 GB** on a 16-core laptop CPU for a real update (E1b) |
+| Submitter hardware | LEZ gas only | a prover: **1,107 s, 13.1 GB** on a 16-core laptop CPU for a real update (E1b) |
 
 Public-path figures come from Proposal #224's published measurements, not from this experiment.
 
 ### Findings worth keeping
 
-1. Proving cost splits into a fixed part (about 233 s for any private transaction on this CPU) and the update itself (about 845 s more for the E1b update, 14.0M cycles). GPU proving should cut both by an order of magnitude (Tessera reports about 30x on an NVIDIA L4), which is not yet measured here.
+1. Proving cost splits into a fixed part (about 233 s for any private transaction on this CPU) and the update itself (about 874 s more for the E1b update, 14.1M cycles). GPU proving should cut both by an order of magnitude (Tessera reports about 30x on an NVIDIA L4), which is not yet measured here.
 2. A canonical sender publishes the submitter's private account ID in the boundary message. Blind it (the test does).
 3. A losing racer pays its whole reserve. The update daemon must re-check the instance immediately before submitting (R.9) and keep its reserve tight.
 4. LEZ refuses `test-utils` in release builds without debug assertions. `chain_state` tests run with `CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true`.
@@ -72,7 +72,7 @@ Public-path figures come from Proposal #224's published measurements, not from t
 |---|---|---|
 | **Run on a standalone sequencer node** | Settlement code is covered (`settle_transaction`, the code the sequencer runs). Untested: RPC submission, mempool admission, deployment through the program loader, the node's rules on which public accounts a private transaction may touch. | Needs a Bedrock node. LEZ's resolver found **no prebuilt binary** for the pinned revision and the source build **failed to link** here (Rust 1.99, `rust-lld`). Next try: `bedrock/tools/resolve_bedrock_node_in_docker.sh`, then an integration test modelled on `integration_tests/tests/async_payouts.rs`. |
 | GPU proving time | Sets realistic operator cost and update latency. | Metal needs Xcode + Metal toolchain (only Command Line Tools here). Or run on a CUDA box. |
-| Remote proving (Bonsai, Boundless) | Lets operators without proving hardware submit. A prover is liveness-only: it cannot forge an update. | Split the proof. The heavy program proof (about 845 s, public inputs only) goes remote. The privacy-circuit proof (about 233 s, needs the submitter's private keys) stays local. LEZ proves both through one `default_prover()`, so the split needs a small LEZ change or a daemon-side path. Open checks: Bonsai availability, and whether Boundless receipts work as circuit assumptions. Fallback: a throwaway fee-only private account. Planned as E1d (needs an API key). |
+| Remote proving (Bonsai, Boundless) | Lets operators without proving hardware submit. A prover is liveness-only: it cannot forge an update. | Split the proof. The heavy program proof (about 874 s, public inputs only) goes remote. The privacy-circuit proof (about 233 s, needs the submitter's private keys) stays local. LEZ proves both through one `default_prover()`, so the split needs a small LEZ change or a daemon-side path. Open checks: Bonsai availability, and whether Boundless receipts work as circuit assumptions. Fallback: a throwaway fee-only private account. Planned as E1d (needs an API key). |
 | Lowest-spec machine | P.4 asks for the declared minimum. | Repeat `e1b-prove` on a 16 GB machine. |
 | Testnet 0.4 | Delivery target; not released (end of November per roadmap). | Re-run on release. |
 
