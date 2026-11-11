@@ -1,5 +1,5 @@
-//! The program's accounts and events (proposal section 4), and the two
-//! transitions that write them: [`init`] and [`advance`].
+//! The program's accounts and events (proposal section 4), and the
+//! transitions that write them: [`init`], [`hand_off`] and [`advance`].
 //!
 //! Each account object is Borsh-encoded and stores the values its address is
 //! derived from. Addresses are LEZ PDAs of the program. This crate has no LEZ
@@ -9,6 +9,15 @@
 //! Every account is written once. A second write to the same address is
 //! refused by the program, so an update that reaches a block already written
 //! is refused (R.8).
+//!
+//! The transitions take account values and check each value's address only.
+//! The program supplies the values under two rules:
+//!
+//! - It loads the header from the account at `state.finalised_header`. It
+//!   never takes header bytes from the caller.
+//! - It loads the `Committee` account at `state.period + 1` when that account
+//!   exists, and passes it to [`advance`] as `next`. With `None`, `advance`
+//!   returns that committee again, and the write-once rule refuses the update.
 
 use alloc::vec::Vec;
 
