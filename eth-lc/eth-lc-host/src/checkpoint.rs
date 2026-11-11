@@ -76,6 +76,13 @@ pub struct CheckpointPolicy {
     /// `compute_weak_subjectivity_period` (`specs/phase0/weak-subjectivity.md`,
     /// `specs/electra/weak-subjectivity.md`, `specs/gloas/weak-subjectivity.md`).
     pub max_age_epochs: u64,
+    /// Lowest `min_participants` an instance may set. The default, 342, is two
+    /// thirds of the mainnet-preset sync committee (512).
+    pub min_participants: u16,
+    /// Longest `weak_subjectivity_period` an instance may set, in epochs. The
+    /// default, 256 epochs, is the floor of `compute_weak_subjectivity_period`,
+    /// so a window inside it is inside the computed period at any validator set.
+    pub max_weak_subjectivity_epochs: u64,
 }
 
 impl Default for CheckpointPolicy {
@@ -83,6 +90,8 @@ impl Default for CheckpointPolicy {
         Self {
             min_endpoints: 2,
             max_age_epochs: 256,
+            min_participants: 342,
+            max_weak_subjectivity_epochs: 256,
         }
     }
 }
@@ -108,6 +117,9 @@ pub enum CheckpointError {
     ConfigMismatch { endpoint: String, field: String },
     /// No execution endpoint served the RLP header a Gloas-variant bootstrap needs.
     MissingExecutionHeader { reason: String },
+    /// A finality parameter of the config is outside the policy:
+    /// `min_participants` or `weak_subjectivity_period`.
+    FinalityOutsidePolicy { field: String },
 }
 
 impl fmt::Display for CheckpointError {
@@ -145,13 +157,15 @@ fn expected_fields(cfg: &ChainConfig) -> Vec<(String, String)> {
     v
 }
 
-/// Checks the chain config of an instance against the chain.
+/// Checks the chain config of an instance against the chain and the policy.
 ///
 /// Succeeds only when: at least `min_endpoints` Beacon API endpoints answer;
 /// each reports, in `/eth/v1/beacon/genesis` and `/eth/v1/config/spec`, the
 /// config's genesis validators root, genesis time, preset fields, and every
 /// fork version and epoch from phase0 through Gloas; at least one execution
-/// endpoint answers `eth_chainId`; and each that answers reports `chain_id`.
+/// endpoint answers `eth_chainId`; each that answers reports `chain_id`;
+/// `min_participants` is at least the policy's `min_participants`; and
+/// `weak_subjectivity_period` is at most `max_weak_subjectivity_epochs`.
 pub fn verify_instance_config(
     cfg: &ChainConfig,
     endpoints: &[String],
@@ -212,6 +226,19 @@ pub fn verify_instance_config(
             answered: 0,
             required: 1,
         });
+    }
+    let outside = |field: &str| CheckpointError::FinalityOutsidePolicy {
+        field: field.to_string(),
+    };
+    if cfg.min_participants < policy.min_participants {
+        return Err(outside("min_participants"));
+    }
+    let max_ws = policy
+        .max_weak_subjectivity_epochs
+        .saturating_mul(cfg.slots_per_epoch)
+        .saturating_mul(cfg.seconds_per_slot);
+    if cfg.weak_subjectivity_period > max_ws {
+        return Err(outside("weak_subjectivity_period"));
     }
     Ok(())
 }

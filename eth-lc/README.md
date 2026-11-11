@@ -119,7 +119,10 @@ chain:
   and every fork version and epoch (phase0 through Gloas) with each Beacon
   API endpoint's `/eth/v1/beacon/genesis` and `/eth/v1/config/spec`, and the
   chain id with each execution endpoint's `eth_chainId`. Every answering
-  endpoint must agree.
+  endpoint must agree. It also checks the finality parameters against the
+  policy: `min_participants` at least 342 and `weak_subjectivity_period` at
+  most 256 epochs by default (the floor of `compute_weak_subjectivity_period`).
+  The core accepts any `min_participants` from 1 to 512.
 - `verify_new_checkpoint` runs `verify_instance_config` first, then checks the
   checkpoint (below).
 

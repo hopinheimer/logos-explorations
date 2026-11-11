@@ -339,6 +339,25 @@ fn instance_config_refuses_any_field_mismatch() {
 }
 
 #[test]
+fn instance_config_refuses_finality_outside_policy() {
+    let urls: Vec<String> = three(&SEPOLIA).into_iter().map(serve).collect();
+    let rpc = vec![rpc_for(&SEPOLIA)];
+    let policy = CheckpointPolicy::default();
+    let check = |cfg: &ChainConfig| verify_instance_config(cfg, &urls, &rpc, &policy);
+    let mut cfg = ChainConfig::sepolia();
+    cfg.min_participants = 341;
+    assert!(matches!(check(&cfg),
+        Err(CheckpointError::FinalityOutsidePolicy { field }) if field == "min_participants"));
+    cfg.min_participants = 512;
+    check(&cfg).unwrap();
+    cfg.weak_subjectivity_period = 256 * 32 * 12 + 1;
+    assert!(matches!(check(&cfg),
+        Err(CheckpointError::FinalityOutsidePolicy { field }) if field == "weak_subjectivity_period"));
+    cfg.weak_subjectivity_period = 256 * 32 * 12;
+    check(&cfg).unwrap();
+}
+
+#[test]
 fn one_endpoint_fails() {
     let r = Responses::recorded(&MAINNET);
     assert!(run(vec![r.clone(), r.clone()], now(&MAINNET)).is_ok());
