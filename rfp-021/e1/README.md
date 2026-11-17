@@ -38,11 +38,11 @@ The program pins the mainnet preset and takes the chain identity from `Init`, so
 | E1a, dev | blinded sender | still recognised as its program; settles |
 | E1a, dev | same transaction replayed | refused by LEZ (commitment already seen) |
 | E1a, **real proof** | toy update, 12.6M cycles | settles with a verified receipt; **895 s** CPU, **13.0 GB** peak, proof **224,813 B** |
-| E1b, dev | **real mainnet update** with committee handoff (period 1902 to 1903, step 1) | settles; private **14,058,921** cycles, public part **19,959** cycles; input 52,218 B stays off chain |
+| E1b, dev | **real mainnet update** with committee handoff (period 1902 to 1903, step 1) | settles; private **8,748,436** cycles, public part **19,959** cycles; input 3,510 B stays off chain. Steps 0 to 3: 8,714,317 to 8,748,436 (13,990,140 to 14,058,921 before the committee witness, uncompressed signature and single Miller loop in `eth-lc-core` 0.2) |
 | E1b, dev | guest wire and `Update` window, step 1 (`just e1b-window`) | settles at `stale_after_ms - 1`; refused at `stale_after_ms`; one trailing input byte refused. The README guest example (`just consumer-check` in `eth-lc`) passes the same cases, and its `Attest` leaves the timestamp window open |
 | E1b, dev | two instances under one program, steps 1 and 2 (`just e1b-instances`) | an update advances only its own instance; step 1's input sent to the other instance is refused, and neither instance moves |
-| E1b, **real proof** | the same real update | settles with a verified receipt; **1,107 s** CPU, **13.1 GB** peak, transaction **228,355 B** |
-| E1b, dev | the same real update **executed directly** (what a sequencer would run on the public path) | **255 ms** mean of 5. For scale: LEZ's fee model prices verifying a private-transaction receipt at about 12 ms (`PRIVATE_VERIFY_GAS`, M2 Pro calibration) |
+| E1b, **real proof** | the same real update, on `eth-lc-core` 0.1 (14,058,921 cycles) | settles with a verified receipt; **1,107 s** CPU, **13.1 GB** peak, transaction **228,355 B**. On 0.2: ⟨measure⟩ |
+| E1b, dev | the same real update **executed directly** (what a sequencer would run on the public path) | **182 ms** mean of 5 (255 ms on `eth-lc-core` 0.1). For scale: LEZ's fee model prices verifying a private-transaction receipt at about 12 ms (`PRIVATE_VERIFY_GAS`, M2 Pro calibration) |
 | E1c, dev | toy update through the block fee path (`settle_transaction`) | exec gas **419,311** = 409,764 flat + 9,547; storage gas **224,063**; **4.19%** of a block's exec, **22.4%** of its storage; base fee 5,146,992 at the floor price |
 | E1c, dev | two operators race the same update | loser lands as a **charged revert**: 5,470,616 (its full reserve), store unchanged |
 | E1c, **real proofs** | both E1c cases, tiny private burn | identical gas and fees with real receipts; 3 proofs in 699 s (**about 233 s per private transaction** of fixed circuit overhead) |
@@ -55,7 +55,7 @@ The program pins the mainnet preset and takes the chain identity from `Init`, so
 | Storage gas per update | update material, about 52 KB | 224,063 (the receipt) |
 | Base fee at floor prices | about 101M | about 5.1M (**about 20x less**) |
 | Job state across transactions | yes | none |
-| Submitter hardware | LEZ gas only | a prover: **1,107 s, 13.1 GB** on a 16-core laptop CPU for a real update (E1b) |
+| Submitter hardware | LEZ gas only | a prover: **1,107 s, 13.1 GB** on a 16-core laptop CPU for a real update (E1b, `eth-lc-core` 0.1) |
 
 Public-path figures come from Proposal #224's published measurements, not from this experiment.
 

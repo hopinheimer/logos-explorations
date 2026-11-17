@@ -108,12 +108,19 @@ fn layout_of(f: ForkName) -> ForkName {
     }
 }
 
-/// Decodes an update in the layout of its attested slot's fork.
-fn decode_update(cfg: &ChainConfig, bytes: &[u8]) -> LightClientUpdate {
+/// Decodes an update in the layout of its attested slot's fork, and the keys
+/// of the next committee it carries (the core update holds only its root).
+fn decode_update(cfg: &ChainConfig, bytes: &[u8]) -> (LightClientUpdate, Option<SyncCommittee>) {
     for layout in LAYOUTS {
         if let Ok(raw) = forks::decode_update(layout, Preset::Minimal, Wire::Ssz(bytes)) {
             if layout_of(cfg.fork_at_slot(raw.attested_header.beacon().slot)) == layout {
-                return forks::to_core_update(cfg, &raw).unwrap();
+                let update = forks::to_core_update(cfg, &raw).unwrap();
+                let next = update
+                    .next_sync_committee
+                    .as_ref()
+                    .and(raw.next)
+                    .map(|(c, _)| c);
+                return (update, next);
             }
         }
     }
@@ -402,20 +409,9 @@ impl SpecStore {
 
     /// `process_light_client_update`. Returns whether the 2/3 arm applied.
     fn process(&mut self, update: &LightClientUpdate, current_slot: u64) -> Result<bool, Error> {
-        if let Some((c, _)) = &update.next_sync_committee {
-            self.committees.insert(c.hash_tree_root(), c.clone());
-        }
         let committee = self.signer_for(&self.core, update);
-        let hints =
-            key_hints(&committee, &update.sync_aggregate.bits).map_err(|_| Error::InvalidKey)?;
-        validate_light_client_update(
-            &self.cfg,
-            &self.core,
-            update,
-            &committee,
-            &hints,
-            current_slot,
-        )?;
+        let hints = key_hints(&committee, &update.sync_aggregate).map_err(|_| Error::InvalidKey)?;
+        validate_light_client_update(&self.cfg, &self.core, update, &hints, current_slot)?;
         if self
             .best_valid_update
             .as_ref()
@@ -498,7 +494,7 @@ impl SpecStore {
 /// transition, and the anchor of a new finalized header.
 fn strict_model(cfg: &ChainConfig, st: &Store, input: &UpdateInput) -> Result<Store, Error> {
     let u = &input.update;
-    validate_light_client_update(cfg, st, u, &input.committee, &input.hints, u64::MAX)?;
+    validate_light_client_update(cfg, st, u, &input.hints, u64::MAX)?;
     if popcount(u) * 3 < cfg.sync_committee_size as u64 * 2 {
         return Err(Error::NoSupermajority);
     }
@@ -597,11 +593,21 @@ fn run_case(dir_fork: ForkName, case: &Path) -> Outcome {
     // Every header of the case, for the preimage derivations.
     let steps = yaml(&case.join("steps.yaml"));
     let mut updates = HashMap::new();
+    // Committee keys by root: the store holds roots, and the signer's keys are
+    // looked up by the root the store selects.
+    let mut committees: HashMap<Root, SyncCommittee> = [(
+        bootstrap.current_sync_committee.hash_tree_root(),
+        bootstrap.current_sync_committee.clone(),
+    )]
+    .into();
     let mut headers = vec![bootstrap.header.clone()];
     for step in steps.as_sequence().unwrap() {
         if let Some(s) = step.get("process_update") {
             let name = s["update"].as_str().unwrap().trim().to_string();
-            let u = decode_update(&cfg, &snappy(&case.join(format!("{name}.ssz_snappy"))));
+            let (u, next) = decode_update(&cfg, &snappy(&case.join(format!("{name}.ssz_snappy"))));
+            if let Some(c) = next {
+                committees.insert(c.hash_tree_root(), c);
+            }
             headers.push(u.attested_header.clone());
             headers.extend(u.finality.iter().map(|(h, _)| h.clone()));
             updates.insert(name, u);
@@ -627,11 +633,7 @@ fn run_case(dir_fork: ForkName, case: &Path) -> Outcome {
         best_valid_update: None,
         previous_max_active_participants: 0,
         current_max_active_participants: 0,
-        committees: [(
-            bootstrap.current_sync_committee.hash_tree_root(),
-            bootstrap.current_sync_committee.clone(),
-        )]
-        .into(),
+        committees,
     };
     let mut st = st0;
     // Set by an accept-rule refusal, cleared by an accepted step.
@@ -654,8 +656,7 @@ fn run_case(dir_fork: ForkName, case: &Path) -> Outcome {
             let committee = spec.signer_for(&st, update);
             let advances = update.finalized_slot() > st.finalized.slot;
             let input = UpdateInput {
-                hints: key_hints(&committee, &update.sync_aggregate.bits).unwrap(),
-                committee,
+                hints: key_hints(&committee, &update.sync_aggregate).unwrap(),
                 update: update.clone(),
                 execution_header_rlp: match &update.finality {
                     Some((h, _)) if advances => preimages.of(h, &sctx),

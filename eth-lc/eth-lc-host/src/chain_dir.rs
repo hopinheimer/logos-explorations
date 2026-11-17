@@ -51,6 +51,9 @@ pub struct ChainDir {
     pub bootstrap: BootstrapInput,
     pub updates: Vec<LightClientUpdate>,
     pub finality_update: Option<LightClientUpdate>,
+    /// The committees the directory carries, keys included: the bootstrap's
+    /// and each update's next committee. Updates hold only their roots.
+    pub committees: Vec<SyncCommittee>,
     /// RLP execution headers by block hash, from `execution/`.
     pub execution_headers: HashMap<Root, Vec<u8>>,
 }
@@ -116,15 +119,18 @@ impl ChainDir {
             execution_header_rlp: gloas_preimage(&execution_headers, &header.header)?,
             bootstrap: header,
         };
+        let mut committees = vec![bootstrap.bootstrap.current_sync_committee.clone()];
         let updates = manifest
             .updates
             .iter()
             .map(|e| {
                 let (fork, bytes) = read(e)?;
-                forks::to_core_update(
-                    &cfg,
-                    &forks::decode_update(fork, preset, Wire::Ssz(&bytes))?,
-                )
+                let raw = forks::decode_update(fork, preset, Wire::Ssz(&bytes))?;
+                let update = forks::to_core_update(&cfg, &raw)?;
+                if let (Some(_), Some((c, _))) = (&update.next_sync_committee, raw.next) {
+                    committees.push(c);
+                }
+                Ok(update)
             })
             .collect::<Result<_>>()?;
         let finality_update = manifest
@@ -143,6 +149,7 @@ impl ChainDir {
             bootstrap,
             updates,
             finality_update,
+            committees,
             execution_headers,
         })
     }
@@ -188,19 +195,15 @@ impl ChainDir {
         } else {
             store.next_committee_root
         };
-        std::iter::once(&self.bootstrap.bootstrap.current_sync_committee)
-            .chain(
-                self.updates
-                    .iter()
-                    .filter_map(|u| u.next_sync_committee.as_ref().map(|(c, _)| c)),
-            )
+        self.committees
+            .iter()
             .find(|c| Some(c.hash_tree_root()) == want)
             .cloned()
             .context("no recorded committee matches the selected store root")
     }
 
-    /// The guest input for `update` on top of `store`: the signing committee,
-    /// its key hints, and the RLP execution header when a Gloas-variant
+    /// The guest input for `update` on top of `store`: the key hints of the
+    /// signing committee, and the RLP execution header when a Gloas-variant
     /// finalized header advances the store.
     pub fn update_input(&self, store: &Store, update: &LightClientUpdate) -> Result<UpdateInput> {
         let committee = self.committee_for(store, update)?;
@@ -211,8 +214,7 @@ impl ChainDir {
             _ => None,
         };
         Ok(UpdateInput {
-            hints: key_hints(&committee, &update.sync_aggregate.bits)?,
-            committee,
+            hints: key_hints(&committee, &update.sync_aggregate)?,
             update: update.clone(),
             execution_header_rlp,
         })

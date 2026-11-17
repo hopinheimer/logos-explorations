@@ -111,11 +111,11 @@ fn strict_store_syncs_on_every_supported_fork() {
         // The spec read-only check agrees.
         let u = s.u1();
         assert_eq!(
-            validate_light_client_update(&s.cfg, &s1, &u.update, &u.committee, &u.hints, 81),
+            validate_light_client_update(&s.cfg, &s1, &u.update, &u.hints, 81),
             Ok(())
         );
         assert_eq!(
-            validate_light_client_update(&s.cfg, &s1, &u.update, &u.committee, &u.hints, 80),
+            validate_light_client_update(&s.cfg, &s1, &u.update, &u.hints, 80),
             Err(Error::SlotOrder)
         );
         println!("{fork:?}: bootstrap, fill next, rotate: ok");
@@ -132,14 +132,7 @@ fn accept_rule() {
         assert_eq!(apply(&s, &s1, &early), Err(Error::AcceptRule), "{fork:?}");
         // The spec check alone accepts it.
         assert_eq!(
-            validate_light_client_update(
-                &s.cfg,
-                &s1,
-                &early.update,
-                &early.committee,
-                &early.hints,
-                70
-            ),
+            validate_light_client_update(&s.cfg, &s1, &early.update, &early.hints, 70),
             Ok(())
         );
         // With a next-period finalized header: accepted.
@@ -271,7 +264,7 @@ fn mutations_fail() {
         );
         m(
             "duplicate hint",
-            &|i| i.hints.non_signers.push(i.hints.non_signers[1]),
+            &|i| i.hints.non_signers.push(i.hints.non_signers[1].clone()),
             &s0,
             Error::HintMismatch,
         );
@@ -305,7 +298,7 @@ fn mutations_fail() {
             "aggregate hint",
             &|i| i.hints.aggregate = i.hints.non_signers[0].1,
             &s0,
-            Error::InvalidKey,
+            Error::CommitteeMismatch,
         );
         m(
             "bits length",
@@ -315,7 +308,7 @@ fn mutations_fail() {
         );
         m(
             "wrong committee",
-            &|i| i.committee.pubkeys.swap(0, 1),
+            &|i| i.hints.pubkeys_root[0] ^= 1,
             &s0,
             Error::CommitteeMismatch,
         );
@@ -362,18 +355,22 @@ fn mutations_fail() {
             Error::SignaturePeriod,
         );
         m(
-            "next committee size",
-            &|i| {
-                i.update
-                    .next_sync_committee
-                    .as_mut()
-                    .unwrap()
-                    .0
-                    .pubkeys
-                    .pop();
-            },
+            "next committee root",
+            &|i| i.update.next_sync_committee.as_mut().unwrap().0[0] ^= 1,
             &s0,
-            Error::CommitteeSize,
+            Error::InvalidNextCommitteeBranch,
+        );
+        m(
+            "non-signer branch node",
+            &|i| i.hints.non_signers[0].2[3][0] ^= 1,
+            &s0,
+            Error::InvalidKey,
+        );
+        m(
+            "signature hint",
+            &|i| i.hints.signature[191] ^= 1,
+            &s0,
+            Error::InvalidSignature,
         );
         drop(m);
         // Same-period update carrying another next committee than the stored one.

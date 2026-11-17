@@ -658,7 +658,7 @@ fn mainnet_update_mutations_fail() {
         (
             "duplicate hint",
             Box::new(|i| {
-                let h = i.hints.non_signers[0];
+                let h = i.hints.non_signers[0].clone();
                 i.hints.non_signers.push(h);
             }),
             Error::HintMismatch,
@@ -670,7 +670,7 @@ fn mainnet_update_mutations_fail() {
         ),
         (
             "wrong committee",
-            Box::new(|i| i.committee.pubkeys.swap(3, 4)),
+            Box::new(|i| i.hints.pubkeys_root[0] ^= 1),
             Error::CommitteeMismatch,
         ),
         (

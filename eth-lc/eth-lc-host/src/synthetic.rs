@@ -309,8 +309,8 @@ pub fn make_update(cfg: &ChainConfig, spec: &UpdateSpec, signer: &TestCommittee)
         attested_header: attested,
         next_sync_committee: spec
             .next
-            .clone()
-            .map(|c| (c, branches[&next_gindex].clone())),
+            .as_ref()
+            .map(|c| (c.hash_tree_root(), branches[&next_gindex].clone())),
         finality: finalized.map(|(h, _)| (h, branches[&fin_gindex].clone())),
         sync_aggregate: SyncAggregate {
             bits: bits.clone(),
@@ -319,8 +319,7 @@ pub fn make_update(cfg: &ChainConfig, spec: &UpdateSpec, signer: &TestCommittee)
         signature_slot: spec.signature_slot,
     };
     UpdateInput {
-        hints: key_hints(&signer.committee, &bits).expect("test keys decompress"),
-        committee: signer.committee.clone(),
+        hints: key_hints(&signer.committee, &update.sync_aggregate).expect("test keys decompress"),
         update,
         execution_header_rlp: rlp,
     }

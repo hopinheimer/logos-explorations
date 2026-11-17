@@ -26,8 +26,11 @@ that form.
 | `claim::check_claim(&header, &claim)` | Checks a `Claim` (facts, each a `Proof` and `Condition`s) against a `FinalisedHeader` and returns the `Statement` (proposal 4.5 to 4.7). |
 | `FinalisedHeader::from_store(config, instance, &store, signers, period)` | The header account of a store's finalized header. |
 
-Inputs carry the full signing committee and `KeyHints` (uncompressed keys of
-the committee aggregate and of each non-signer). `eth-lc-host` builds them.
+Inputs carry `KeyHints` in place of the signing committee: the root of its
+keys, its aggregate key, each non-signer's key with its branch to that root,
+and the signature, all uncompressed. An update carries its next committee as
+the committee's root. `KeyHints::new` builds the hints from a committee, and
+`eth-lc-host` builds whole inputs.
 
 ## Trust model
 
@@ -56,10 +59,15 @@ the committee aggregate and of each non-signer). `eth-lc-host` builds them.
 - A stall is fatal for an instance. Each instance keeps its first anchor for
   life. Recovery is a new instance with a fresh `Init` (see "Stalls and
   migration" in the workspace README).
-- Hinted keys skip the per-key subgroup check. A hinted key is on the curve and
-  compresses to the committed bytes, so it is the committed key. The committed
-  bytes chain by hash to the trusted checkpoint. The participant key must
-  differ from the identity point.
+- Hinted keys skip the per-key subgroup check. A hinted key is on the curve,
+  and its compressed bytes are on its branch to the keys root, which with the
+  aggregate key hashes to the committee root the store selected, so it is the
+  committed key. Committee roots chain by hash to the trusted checkpoint. Each
+  key is taken in its plain uncompressed encoding only. The participant key
+  must differ from the identity point.
+- The hinted signature is on the curve, compresses to the update's signature
+  bytes and passes the subgroup check. The pairing check runs its two Miller
+  loops as one, with one final exponentiation.
 
 ## Guest example (LEZ v0.4 actor)
 

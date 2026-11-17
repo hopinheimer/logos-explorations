@@ -171,13 +171,12 @@ struct Validated {
 }
 
 /// `validate_light_client_update` (`specs/altair/light-client/sync-protocol.md`)
-/// minus the `current_slot` bound. `committee` must hash to the store root
-/// the signature period selects; `hints` bind the signer keys.
+/// minus the `current_slot` bound. `hints` must be a witness of the committee
+/// whose root the signature period selects from the store.
 fn validate(
     cfg: &ChainConfig,
     store: &Store,
     update: &LightClientUpdate,
-    committee: &SyncCommittee,
     hints: &KeyHints,
 ) -> Result<Validated, Error> {
     // Verify sync committee has sufficient participants.
@@ -237,9 +236,8 @@ fn validate(
     }
 
     // Verify the next sync committee against the attested state.
-    if let Some((next, branch)) = &update.next_sync_committee {
-        check_committee_size(cfg, next)?;
-        let next_root = next.hash_tree_root();
+    if let Some((next_root, branch)) = &update.next_sync_committee {
+        let next_root = *next_root;
         if attested_period == store_period {
             if let Some(stored) = store.next_committee_root {
                 if stored != next_root {
@@ -263,10 +261,7 @@ fn validate(
     } else {
         store.next_committee_root
     };
-    check_committee_size(cfg, committee)?;
-    if selected != Some(committee.hash_tree_root()) {
-        return Err(Error::CommitteeMismatch);
-    }
+    let committee_root = selected.ok_or(Error::CommitteeMismatch)?;
     let fork_version_slot = update.signature_slot.saturating_sub(1);
     let fork_version = cfg.fork_version_at_epoch(cfg.compute_epoch_at_slot(fork_version_slot));
     let domain = compute_domain(
@@ -275,7 +270,13 @@ fn validate(
         &cfg.genesis_validators_root,
     );
     let signing_root = compute_signing_root(&attested.hash_tree_root(), &domain);
-    verify_sync_aggregate(committee, hints, &update.sync_aggregate, &signing_root)?;
+    verify_sync_aggregate(
+        cfg,
+        &committee_root,
+        hints,
+        &update.sync_aggregate,
+        &signing_root,
+    )?;
 
     Ok(Validated {
         participants,
@@ -291,14 +292,13 @@ pub fn validate_light_client_update(
     cfg: &ChainConfig,
     store: &Store,
     update: &LightClientUpdate,
-    committee: &SyncCommittee,
     hints: &KeyHints,
     current_slot: u64,
 ) -> Result<(), Error> {
     if current_slot < update.signature_slot {
         return Err(Error::SlotOrder);
     }
-    validate(cfg, store, update, committee, hints).map(|_| ())
+    validate(cfg, store, update, hints).map(|_| ())
 }
 
 /// `apply_light_client_update` (`specs/altair/light-client/sync-protocol.md`),
@@ -312,10 +312,7 @@ pub(crate) fn apply_light_client_update(
 ) -> Result<(), Error> {
     let store_period = cfg.period_at_slot(store.finalized.slot);
     let finalized_period = cfg.period_at_slot(update.finalized_slot());
-    let next_root = update
-        .next_sync_committee
-        .as_ref()
-        .map(|(c, _)| c.hash_tree_root());
+    let next_root = update.next_sync_committee.as_ref().map(|(root, _)| *root);
     match store.next_committee_root {
         None => {
             if finalized_period != store_period {
@@ -348,7 +345,7 @@ pub(crate) fn apply_light_client_update(
 pub fn apply_update(cfg: &ChainConfig, store: &Store, input: &UpdateInput) -> Result<Store, Error> {
     check_profile(cfg)?;
     let update = &input.update;
-    let v = validate(cfg, store, update, &input.committee, &input.hints)?;
+    let v = validate(cfg, store, update, &input.hints)?;
     if v.participants < u32::from(cfg.min_participants) {
         return Err(Error::NoSupermajority);
     }

@@ -102,7 +102,7 @@ use eth_lc_host::ChainDir;
 let dir = ChainDir::load("eth-lc/vectors/mainnet")?;
 let mut store = initialize_store(&dir.cfg, &dir.bootstrap)?;
 for update in dir.all_updates() {
-    let input = dir.update_input(&store, update)?; // committee + key hints
+    let input = dir.update_input(&store, update)?; // update + key hints (the committee witness)
     store = apply_update(&dir.cfg, &store, &input)?;
 }
 ```

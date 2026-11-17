@@ -80,7 +80,7 @@ fn update() -> LightClientUpdate {
     let [_, d, _] = headers();
     LightClientUpdate {
         attested_header: d.clone(),
-        next_sync_committee: Some((committee(), vec![[19; 32]])),
+        next_sync_committee: Some(([18; 32], vec![[19; 32]])),
         finality: Some((d, vec![[20; 32]])),
         sync_aggregate: SyncAggregate {
             bits: vec![0xff, 0x7f],
@@ -205,18 +205,21 @@ fn golden_encodings() {
         (
             "KeyHints",
             digest(&KeyHints {
+                pubkeys_root: [63; 32],
                 aggregate: [35; 96],
-                non_signers: vec![(36, [37; 96])],
+                non_signers: vec![(36, [37; 96], vec![[64; 32]])],
+                signature: [65; 192],
             }),
         ),
         (
             "UpdateInput",
             digest(&UpdateInput {
                 update: update(),
-                committee: committee(),
                 hints: KeyHints {
+                    pubkeys_root: [63; 32],
                     aggregate: [35; 96],
                     non_signers: vec![],
+                    signature: [65; 192],
                 },
                 execution_header_rlp: Some(vec![38]),
             }),
@@ -321,10 +324,10 @@ const GOLDEN: &[(&str, &str)] = &[
     ("LightClientHeader::Gloas", "181 5106d72af5d33115"),
     ("SyncCommittee", "148 e76812f1fc46a522"),
     ("LightClientBootstrap", "365 7098a1ae05a86472"),
-    ("LightClientUpdate", "1802 49e08258cae79228"),
+    ("LightClientUpdate", "1686 5648d3adf92ba513"),
     ("Store", "281 c59266f0765f30a6"),
-    ("KeyHints", "200 289eaa755ef03658"),
-    ("UpdateInput", "2056 24273338a56762c1"),
+    ("KeyHints", "460 fcb1a01b2c0d160f"),
+    ("UpdateInput", "2016 c8f3168726ab5e7b"),
     ("BootstrapInput", "904 45b54820f494ee6d"),
     ("ConsensusState", "153 c9a2ec750bf5cc6a"),
     ("Committee", "80 4ba39713f332eabe"),

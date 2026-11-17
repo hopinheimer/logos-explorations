@@ -201,11 +201,12 @@ pub struct LightClientBootstrap {
 
 /// `LightClientUpdate` (`specs/altair/light-client/sync-protocol.md`).
 /// `None` stands for the spec's empty next committee or empty finality data
-/// (an all-zero branch).
+/// (an all-zero branch). The next committee is its `hash_tree_root`: the store
+/// keeps only that root, so its keys are not needed until it signs.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
 pub struct LightClientUpdate {
     pub attested_header: LightClientHeader,
-    pub next_sync_committee: Option<(SyncCommittee, Vec<Root>)>,
+    pub next_sync_committee: Option<(Root, Vec<Root>)>,
     pub finality: Option<(LightClientHeader, Vec<Root>)>,
     pub sync_aggregate: SyncAggregate,
     pub signature_slot: u64,
@@ -227,8 +228,9 @@ pub struct ExecutionAnchor {
     pub receipts_root: Root,
 }
 
-/// The light-client store. Committees are kept as roots; inputs carry the
-/// full committee, which must hash to the selected root.
+/// The light-client store. Committees are kept as roots; inputs carry a
+/// witness of the signing committee ([`KeyHints`]) that must hash to the
+/// selected root.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Store {
     pub finalized: BeaconBlockHeader,
@@ -237,19 +239,29 @@ pub struct Store {
     pub next_committee_root: Option<Root>,
 }
 
-/// Uncompressed G1 keys (96 bytes) for the signature check: the committee
-/// aggregate and each non-signer, by committee index.
+/// What the signature check needs of the signing committee, in place of its
+/// keys: the root of its `pubkeys` vector, its aggregate key, and each
+/// non-signer's key with its branch to that root. Hashing all the keys cost
+/// about a tenth of an update; this proves the committee root with one hash
+/// and each non-signer with one hash per tree level. Points are uncompressed,
+/// so the guest takes no square roots.
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
 pub struct KeyHints {
+    /// `hash_tree_root` of the committee's `pubkeys` vector.
+    pub pubkeys_root: Root,
+    /// The committee aggregate key, uncompressed (96 bytes).
     pub aggregate: [u8; 96],
-    pub non_signers: Vec<(u32, [u8; 96])>,
+    /// Each non-signer, in committee order: index, uncompressed key, and the
+    /// branch from its key's root to `pubkeys_root`.
+    pub non_signers: Vec<(u32, [u8; 96], Vec<Root>)>,
+    /// The sync aggregate signature, uncompressed (192 bytes).
+    pub signature: [u8; 192],
 }
 
 /// Input of [`crate::apply_update`].
 #[derive(BorshSerialize, BorshDeserialize, Clone, PartialEq, Eq, Debug)]
 pub struct UpdateInput {
     pub update: LightClientUpdate,
-    pub committee: SyncCommittee,
     pub hints: KeyHints,
     /// RLP of the execution header a Gloas finalized header names.
     pub execution_header_rlp: Option<Vec<u8>>,

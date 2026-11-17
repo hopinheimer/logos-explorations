@@ -614,7 +614,8 @@ pub fn to_core_bootstrap(
 }
 
 /// Converts a decoded update to the core type. An all-zero branch maps to
-/// `None`; the spec then requires the matching data to be empty.
+/// `None`; the spec then requires the matching data to be empty. The next
+/// committee becomes its root; its keys stay in the [`RawUpdate`].
 pub fn to_core_update(cfg: &ChainConfig, u: &RawUpdate) -> Result<core::LightClientUpdate> {
     let zero = |b: &[core::Root]| b.iter().all(|n| *n == [0; 32]);
     let next = match &u.next {
@@ -625,7 +626,8 @@ pub fn to_core_update(cfg: &ChainConfig, u: &RawUpdate) -> Result<core::LightCli
             );
             None
         }
-        other => other.clone(),
+        Some((c, branch)) => Some((c.hash_tree_root(), branch.clone())),
+        None => None,
     };
     let finality = if zero(&u.finality_branch) {
         ensure!(
