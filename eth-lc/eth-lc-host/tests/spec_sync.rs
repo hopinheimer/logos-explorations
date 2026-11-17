@@ -410,7 +410,7 @@ impl SpecStore {
     /// `process_light_client_update`. Returns whether the 2/3 arm applied.
     fn process(&mut self, update: &LightClientUpdate, current_slot: u64) -> Result<bool, Error> {
         let committee = self.signer_for(&self.core, update);
-        let hints = key_hints(&committee, &update.sync_aggregate).map_err(|_| Error::InvalidKey)?;
+        let hints = key_hints(&self.cfg, &committee, update).map_err(|_| Error::InvalidKey)?;
         validate_light_client_update(&self.cfg, &self.core, update, &hints, current_slot)?;
         if self
             .best_valid_update
@@ -656,7 +656,7 @@ fn run_case(dir_fork: ForkName, case: &Path) -> Outcome {
             let committee = spec.signer_for(&st, update);
             let advances = update.finalized_slot() > st.finalized.slot;
             let input = UpdateInput {
-                hints: key_hints(&committee, &update.sync_aggregate).unwrap(),
+                hints: key_hints(&cfg, &committee, update).unwrap(),
                 update: update.clone(),
                 execution_header_rlp: match &update.finality {
                     Some((h, _)) if advances => preimages.of(h, &sctx),

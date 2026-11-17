@@ -125,3 +125,51 @@ Logs: `../results/e1b-dev-step{0,1,2,3}.log` and `../results/e1b-prove-step1.log
 | `eth-lc/eth-lc-host/tests/{mainnet,synthetic,spec_sync}.rs` | tests on the new types; new mutation cases |
 | `eth-lc/Cargo.toml` | version 0.2.0 |
 | `eth-lc/README.md`, `eth-lc/eth-lc-core/README.md` | input and trust-model notes |
+
+## Step 4 (branch `eth-lc-core-residue`): residue check in place of the final exponentiation
+
+The final exponentiation was the largest remaining cost: 3.7M of the 8.7M cycles. It is replaced
+by the residue check from Novakovic and Eagen, "On Proving Pairings" (eprint 2024/640):
+
+- **What the guest checks:**
+  - the submitter supplies `c` in `Fp12` and `s` in `Fp6` (`KeyHints.residue`,
+    `KeyHints.scaling`);
+  - the guest checks `f * s = c^λ`, where `f` is the Miller loop output and `λ = p - u`, `u`
+    being the BLS12-381 seed;
+  - `c^λ = c^p * c^|u|` is one Frobenius map, 63 squarings and 5 multiplications.
+- **Why this is sound:**
+  - `r` divides `λ` (`p - u = r (u - 1)^2 / 3`), so `c^λ` is an `r`-th power;
+  - `p^6 - 1` divides the final exponent, so `s` raised to the final exponent is 1 for any
+    nonzero `s` in `Fp6`;
+  - together, these give `f^h = 1`, the pairing check.
+- **What the guest also requires,** covering the OpenVM CVE-2026-46669 class of bugs:
+  - `s` is encoded as an `Fp6` element, so it cannot lie elsewhere in `Fp12`;
+  - `c` is nonzero, which rules out the all-zero witness `0 = 0`;
+  - every coordinate is canonical.
+- **The prover's side** (`residue::witness`, host only, `num-bigint`) follows gnark's
+  `finalExpWitness` for BLS12-381. It returns no witness when the pairing check fails.
+- **A trap found on the way:** blst's Rust bindings define `blst_fp12::default()` as **one**,
+  not zero. A non-zero check written against it accepted the all-zero witness. The forgery test
+  caught it, and `residue.rs` uses an explicit zero.
+
+| Step | 0.2 | 0.3 (residue check) | Change | vs 0.1 |
+|---|---:|---:|---:|---:|
+| 0 | 8,714,317 | 6,201,492 | −28.8% | −55.7% |
+| 1 | 8,748,436 | 6,236,056 | −28.7% | −55.6% |
+| 2 | 8,716,828 | 6,204,470 | −28.8% | −55.7% |
+| 3 | 8,748,049 | 6,235,669 | −28.7% | −55.6% |
+
+Dev mode, same harness. The input grows by 864 B (the witness), to 3,965–4,382 B. The update
+executed directly takes 131 to 134 ms.
+
+**Checks:**
+- `just test`: 77 tests pass. New cases: a tampered residue or scaling factor, the all-zero
+  witness, the trivial `(1, 1)` witness, a non-canonical coordinate, another message's witness,
+  and no witness for a failing pairing.
+- `just spec-tests`: same case and step counts as before.
+- `e1b` steps 0 to 3, `e1b-window`, `e1b-instances` and `consumer-check` pass.
+- The borsh layouts of `KeyHints` and `UpdateInput` change, so the version moves to 0.3.0.
+
+**Not done:**
+- the machine-checked soundness proof;
+- a real proof run on 0.3.

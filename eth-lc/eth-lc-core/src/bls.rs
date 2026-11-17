@@ -7,21 +7,26 @@
 //! the root of its keys, the aggregate key, and each non-signer's key with
 //! its branch, all uncompressed and bound to the committee root.
 
+#[cfg(feature = "std")]
 use alloc::vec::Vec;
 
 use blst::min_pk::{AggregatePublicKey, PublicKey};
 use blst::{
-    blst_final_exp, blst_fp12, blst_fp12_is_one, blst_hash_to_g2, blst_miller_loop_n, blst_p1,
-    blst_p1_affine, blst_p1_affine_generator, blst_p1_cneg, blst_p1_from_affine, blst_p1_to_affine,
-    blst_p2, blst_p2_affine, blst_p2_affine_compress, blst_p2_affine_in_g2,
-    blst_p2_affine_serialize, blst_p2_deserialize, blst_p2_to_affine, blst_p2_uncompress,
-    BLST_ERROR,
+    blst_fp12, blst_hash_to_g2, blst_miller_loop_n, blst_p1, blst_p1_affine,
+    blst_p1_affine_generator, blst_p1_cneg, blst_p1_from_affine, blst_p1_to_affine, blst_p2,
+    blst_p2_affine, blst_p2_affine_compress, blst_p2_affine_in_g2, blst_p2_deserialize,
+    blst_p2_to_affine, BLST_ERROR,
 };
+#[cfg(feature = "std")]
+use blst::{blst_p2_affine_serialize, blst_p2_uncompress};
 
 use crate::config::ChainConfig;
 use crate::crypto::hash_pair;
+use crate::residue;
 use crate::ssz::{is_valid_merkle_branch, pubkey_root};
-use crate::types::{KeyHints, Root, SyncAggregate, SyncCommittee};
+#[cfg(feature = "std")]
+use crate::types::SyncCommittee;
+use crate::types::{KeyHints, Root, SyncAggregate};
 use crate::Error;
 
 /// Ciphersuite of Ethereum BLS signatures (`specs/phase0/beacon-chain.md`, BLS signatures).
@@ -61,20 +66,54 @@ fn hinted_key(hint: &[u8; 96]) -> Result<(PublicKey, [u8; 48]), Error> {
 }
 
 /// Uncompressed G1 key of committed bytes, for a hint.
+#[cfg(feature = "std")]
 fn uncompressed_key(pk: &[u8; 48]) -> Result<[u8; 96], Error> {
     PublicKey::uncompress(pk)
         .map(|k| k.serialize())
         .map_err(|_| Error::InvalidKey)
 }
 
+/// The Miller loop of `e(-pk, H(m)) * e(g1, sig)`, both pairs in one loop:
+/// its final exponentiation is 1 iff `sig` is `pk`'s signature over `m`.
+fn miller_loop(pk: &blst_p1_affine, signing_root: &Root, sig: &blst_p2_affine) -> blst_fp12 {
+    let (mut neg, mut neg_pk) = (blst_p1::default(), blst_p1_affine::default());
+    let (mut h, mut hashed) = (blst_p2::default(), blst_p2_affine::default());
+    let mut f = blst_fp12::default();
+    // SAFETY: every pointer is to a live value of the type blst expects.
+    unsafe {
+        blst_p1_from_affine(&mut neg, pk);
+        blst_p1_cneg(&mut neg, true);
+        blst_p1_to_affine(&mut neg_pk, &neg);
+        blst_hash_to_g2(
+            &mut h,
+            signing_root.as_ptr(),
+            signing_root.len(),
+            DST_POP.as_ptr(),
+            DST_POP.len(),
+            core::ptr::null(),
+            0,
+        );
+        blst_p2_to_affine(&mut hashed, &h);
+        let qs = [&hashed as *const blst_p2_affine, sig];
+        let ps = [&neg_pk as *const blst_p1_affine, blst_p1_affine_generator()];
+        blst_miller_loop_n(&mut f, qs.as_ptr(), ps.as_ptr(), 2);
+    }
+    f
+}
+
 impl KeyHints {
-    /// The witness for `bits` over `committee`, and `signature` uncompressed:
-    /// what a submitter sends with an update the committee signed.
+    /// The witness for `aggregate` over `committee`, the signature
+    /// uncompressed, and the pairing check's residue witness for
+    /// `signing_root`: what a submitter sends with an update the committee
+    /// signed. When the signature doesn't verify there is no residue witness,
+    /// and the residue fields hold one, which the check refuses.
+    #[cfg(feature = "std")]
     pub fn new(
         committee: &SyncCommittee,
-        bits: &[u8],
-        signature: &[u8; 96],
+        aggregate: &SyncAggregate,
+        signing_root: &Root,
     ) -> Result<Self, Error> {
+        let (bits, signature) = (&aggregate.bits, &aggregate.signature);
         let leaves: Vec<Root> = committee.pubkeys.iter().map(pubkey_root).collect();
         let size = leaves.len();
         if !size.is_power_of_two() {
@@ -105,11 +144,32 @@ impl KeyHints {
             }
             blst_p2_affine_serialize(uncompressed.as_mut_ptr(), &sig);
         }
+        // The residue witness, over the participant key the guest derives.
+        let signers: Vec<PublicKey> = (0..size)
+            .filter(|&i| bit(bits, i))
+            .map(|i| PublicKey::uncompress(&committee.pubkeys[i]).map_err(|_| Error::InvalidKey))
+            .collect::<Result<_, _>>()?;
+        let refs: Vec<&PublicKey> = signers.iter().collect();
+        let witness = AggregatePublicKey::aggregate(&refs, false)
+            .ok()
+            .map(|a| a.to_public_key())
+            .filter(|pk| pk.compress() != G1_IDENTITY_COMPRESSED)
+            .and_then(|pk| residue::witness(&miller_loop(&pk.into(), signing_root, &sig)));
+        let (residue, scaling) = witness.unwrap_or_else(|| {
+            // SAFETY: `blst_fp12_one` returns a pointer to a static value.
+            let one = unsafe { *blst::blst_fp12_one() };
+            (
+                residue::fp12_to_bytes(&one),
+                residue::fp6_to_bytes(&one).expect("one is in Fp6"),
+            )
+        });
         Ok(Self {
             pubkeys_root: layers[depth][0],
             aggregate: uncompressed_key(&committee.aggregate_pubkey)?,
             non_signers,
             signature: uncompressed,
+            residue,
+            scaling,
         })
     }
 }
@@ -177,8 +237,8 @@ fn participant_key(
 /// the participant key from the witness ([`participant_key`]); it differs from
 /// the identity; the hinted signature is on the curve, compresses to the
 /// committed signature bytes and passes its subgroup check; then
-/// e(-pk, H(m)) * e(g1, sig) = 1, with the two Miller loops run as one and a
-/// single final exponentiation.
+/// e(-pk, H(m)) * e(g1, sig) = 1: the two Miller loops run as one, and the
+/// residue witness stands in for the final exponentiation ([`residue`]).
 pub fn verify_sync_aggregate(
     cfg: &ChainConfig,
     committee_root: &Root,
@@ -199,11 +259,8 @@ pub fn verify_sync_aggregate(
     let pk: blst_p1_affine = pk.into();
     let mut sig = blst_p2_affine::default();
     let mut committed = [0u8; 96];
-    let (mut neg, mut neg_pk) = (blst_p1::default(), blst_p1_affine::default());
-    let (mut h, mut hashed) = (blst_p2::default(), blst_p2_affine::default());
-    let (mut f, mut gt) = (blst_fp12::default(), blst_fp12::default());
-    // SAFETY: every pointer is to a live value of the type blst expects; the
-    // byte buffers are 192 (uncompressed G2) and 96 (compressed G2) bytes.
+    // SAFETY: `sig` is a live `blst_p2_affine`; the byte buffers are 192
+    // (uncompressed G2) and 96 (compressed G2) bytes.
     unsafe {
         if blst_p2_deserialize(&mut sig, hints.signature.as_ptr()) != BLST_ERROR::BLST_SUCCESS {
             return Err(Error::InvalidSignature);
@@ -212,28 +269,12 @@ pub fn verify_sync_aggregate(
         if committed != aggregate.signature || !blst_p2_affine_in_g2(&sig) {
             return Err(Error::InvalidSignature);
         }
-        blst_p1_from_affine(&mut neg, &pk);
-        blst_p1_cneg(&mut neg, true);
-        blst_p1_to_affine(&mut neg_pk, &neg);
-        blst_hash_to_g2(
-            &mut h,
-            signing_root.as_ptr(),
-            signing_root.len(),
-            DST_POP.as_ptr(),
-            DST_POP.len(),
-            core::ptr::null(),
-            0,
-        );
-        blst_p2_to_affine(&mut hashed, &h);
-        let qs = [&hashed as *const blst_p2_affine, &sig];
-        let ps = [&neg_pk as *const blst_p1_affine, blst_p1_affine_generator()];
-        blst_miller_loop_n(&mut f, qs.as_ptr(), ps.as_ptr(), 2);
-        blst_final_exp(&mut gt, &f);
-        if blst_fp12_is_one(&gt) {
-            Ok(())
-        } else {
-            Err(Error::InvalidSignature)
-        }
+    }
+    let f = miller_loop(&pk, signing_root, &sig);
+    if residue::holds(&f, &hints.residue, &hints.scaling) {
+        Ok(())
+    } else {
+        Err(Error::InvalidSignature)
     }
 }
 
@@ -282,8 +323,9 @@ mod tests {
         }
     }
 
+    /// Hints for `agg` over the message every test signs, `[5; 32]`.
     fn hints(c: &SyncCommittee, agg: &SyncAggregate) -> KeyHints {
-        KeyHints::new(c, &agg.bits, &agg.signature).unwrap()
+        KeyHints::new(c, agg, &[5; 32]).unwrap()
     }
 
     fn sign(sks: &[SecretKey], bits: &[u8], msg: &Root) -> [u8; 96] {
@@ -376,7 +418,7 @@ mod tests {
         assert_eq!(verify(&c, &h, &agg, &msg), Err(Error::InvalidKey));
         // A witness of another committee is refused under this one's root.
         let other = committee(&keys(17)[1..]);
-        let h = KeyHints::new(&other, &agg.bits, &agg.signature).unwrap();
+        let h = KeyHints::new(&other, &agg, &msg).unwrap();
         assert_eq!(verify(&c, &h, &agg, &msg), Err(Error::CommitteeMismatch));
         // Zero bit flipped to one, hint kept.
         let mut a = agg.clone();
@@ -402,6 +444,62 @@ mod tests {
             verify(&c, &good, &agg, &[6; 32]),
             Err(Error::InvalidSignature)
         );
+    }
+
+    #[test]
+    fn residue_witness_forgeries_are_refused() {
+        let (_, c, agg, msg) = setup([0b1110_1111, 0b0111_1111]);
+        let good = hints(&c, &agg);
+        assert_eq!(verify(&c, &good, &agg, &msg), Ok(()));
+        // A residue byte, or a scaling byte, changed.
+        let mut h = good.clone();
+        h.residue[100] ^= 1;
+        assert_eq!(verify(&c, &h, &agg, &msg), Err(Error::InvalidSignature));
+        let mut h = good.clone();
+        h.scaling[100] ^= 1;
+        assert_eq!(verify(&c, &h, &agg, &msg), Err(Error::InvalidSignature));
+        // The all-zero witness: `f * 0 = 0^λ` holds for any `f`, so a zero
+        // residue is refused.
+        let mut h = good.clone();
+        h.residue = [0; 576];
+        h.scaling = [0; 288];
+        assert_eq!(verify(&c, &h, &agg, &msg), Err(Error::InvalidSignature));
+        // The trivial witness (one, one) passes only `f = 1`.
+        let mut h = good.clone();
+        h.residue = [0; 576];
+        h.residue[47] = 1;
+        h.scaling = [0; 288];
+        h.scaling[47] = 1;
+        assert_eq!(verify(&c, &h, &agg, &msg), Err(Error::InvalidSignature));
+        // A coordinate at or above p is not canonical.
+        let mut h = good.clone();
+        h.residue[..48].copy_from_slice(&[0xff; 48]);
+        assert_eq!(verify(&c, &h, &agg, &msg), Err(Error::InvalidSignature));
+        // A valid witness for another message does not carry over.
+        let other = KeyHints::new(&c, &agg, &[6; 32]).unwrap();
+        let mut h = good.clone();
+        h.residue = other.residue;
+        h.scaling = other.scaling;
+        assert_eq!(verify(&c, &h, &agg, &msg), Err(Error::InvalidSignature));
+    }
+
+    #[test]
+    fn no_residue_witness_exists_for_a_failing_pairing() {
+        // The pairing for the wrong message is not one: the prover finds no witness.
+        let (_, c, agg, _) = setup([0xff, 0xff]);
+        let pks: Vec<PublicKey> = c
+            .pubkeys
+            .iter()
+            .map(|p| PublicKey::uncompress(p).unwrap())
+            .collect();
+        let refs: Vec<&PublicKey> = pks.iter().collect();
+        let pk: blst_p1_affine = AggregatePublicKey::aggregate(&refs, false)
+            .unwrap()
+            .to_public_key()
+            .into();
+        let sig: blst_p2_affine = Signature::from_bytes(&agg.signature).unwrap().into();
+        assert!(residue::witness(&miller_loop(&pk, &[5; 32], &sig)).is_some());
+        assert!(residue::witness(&miller_loop(&pk, &[6; 32], &sig)).is_none());
     }
 
     #[test]

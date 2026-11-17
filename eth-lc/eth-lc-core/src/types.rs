@@ -256,6 +256,11 @@ pub struct KeyHints {
     pub non_signers: Vec<(u32, [u8; 96], Vec<Root>)>,
     /// The sync aggregate signature, uncompressed (192 bytes).
     pub signature: [u8; 192],
+    /// The pairing check's residue witness `c` in `Fp12`, in place of the
+    /// final exponentiation ([`crate::residue`]).
+    pub residue: [u8; 576],
+    /// Its scaling factor `s` in `Fp6`.
+    pub scaling: [u8; 288],
 }
 
 /// Input of [`crate::apply_update`].

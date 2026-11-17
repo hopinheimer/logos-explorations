@@ -170,6 +170,19 @@ struct Validated {
     signature_period: u64,
 }
 
+/// The root the sync committee signs for `update`: its attested header under
+/// the sync-committee domain of the fork at `signature_slot - 1`.
+pub fn sync_signing_root(cfg: &ChainConfig, update: &LightClientUpdate) -> Root {
+    let fork_version_slot = update.signature_slot.saturating_sub(1);
+    let fork_version = cfg.fork_version_at_epoch(cfg.compute_epoch_at_slot(fork_version_slot));
+    let domain = compute_domain(
+        DOMAIN_SYNC_COMMITTEE,
+        fork_version,
+        &cfg.genesis_validators_root,
+    );
+    compute_signing_root(&update.attested_header.beacon().hash_tree_root(), &domain)
+}
+
 /// `validate_light_client_update` (`specs/altair/light-client/sync-protocol.md`)
 /// minus the `current_slot` bound. `hints` must be a witness of the committee
 /// whose root the signature period selects from the store.
@@ -262,14 +275,7 @@ fn validate(
         store.next_committee_root
     };
     let committee_root = selected.ok_or(Error::CommitteeMismatch)?;
-    let fork_version_slot = update.signature_slot.saturating_sub(1);
-    let fork_version = cfg.fork_version_at_epoch(cfg.compute_epoch_at_slot(fork_version_slot));
-    let domain = compute_domain(
-        DOMAIN_SYNC_COMMITTEE,
-        fork_version,
-        &cfg.genesis_validators_root,
-    );
-    let signing_root = compute_signing_root(&attested.hash_tree_root(), &domain);
+    let signing_root = sync_signing_root(cfg, update);
     verify_sync_aggregate(
         cfg,
         &committee_root,

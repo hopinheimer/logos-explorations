@@ -67,7 +67,13 @@ the committee's root. `KeyHints::new` builds the hints from a committee, and
   must differ from the identity point.
 - The hinted signature is on the curve, compresses to the update's signature
   bytes and passes the subgroup check. The pairing check runs its two Miller
-  loops as one, with one final exponentiation.
+  loops as one.
+- The final exponentiation is replaced by a residue check (eprint 2024/640,
+  `residue`): the prover supplies `c` in `Fp12` and `s` in `Fp6` with
+  `f * s = c^λ`, `λ = p - u`. `r` divides `λ` and `p^6 - 1` divides the final
+  exponent, so this implies the pairing check. `s` is encoded as an `Fp6`
+  element, `c` must be nonzero, and every coordinate must be canonical. The
+  check is not yet machine-checked.
 
 ## Guest example (LEZ v0.4 actor)
 

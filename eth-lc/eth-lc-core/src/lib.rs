@@ -33,6 +33,7 @@ pub mod mpt;
 #[cfg(feature = "spec-oracle")]
 pub mod oracle;
 pub mod profile;
+pub mod residue;
 pub mod ssz;
 pub mod sync;
 pub mod types;

@@ -214,7 +214,7 @@ impl ChainDir {
             _ => None,
         };
         Ok(UpdateInput {
-            hints: key_hints(&committee, &update.sync_aggregate)?,
+            hints: key_hints(&self.cfg, &committee, update)?,
             update: update.clone(),
             execution_header_rlp,
         })

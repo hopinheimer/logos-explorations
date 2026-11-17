@@ -319,7 +319,7 @@ pub fn make_update(cfg: &ChainConfig, spec: &UpdateSpec, signer: &TestCommittee)
         signature_slot: spec.signature_slot,
     };
     UpdateInput {
-        hints: key_hints(&signer.committee, &update.sync_aggregate).expect("test keys decompress"),
+        hints: key_hints(cfg, &signer.committee, &update).expect("test keys decompress"),
         update,
         execution_header_rlp: rlp,
     }
